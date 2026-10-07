@@ -24,7 +24,7 @@ Everything lives in one directory:
 
 ```
 /home/tristanv/Development/qwen-coding-stack/
-├── bin/                   commands: qwen-server, qwen-set, find-ncmoe, sandbox, write-opencode-config
+├── bin/                   commands: qwen-server, qwen-set, find-ncmoe, sandbox, qwen-stack, write-opencode-config
 ├── config/
 │   ├── shell.sh           sourced by ~/.bashrc (adds bin/ to your PATH)
 │   ├── server.env         model, GPU/RAM split, context size, CUDA path (single source of truth)
@@ -33,8 +33,8 @@ Everything lives in one directory:
 ├── llama.cpp/             llama.cpp source and build
 ├── models/                GGUF model files
 ├── sandbox/
-│   ├── Dockerfile         sandbox image
-│   └── opencode-data/     OpenCode sessions, kept between sandbox runs
+│   └── Dockerfile         sandbox image
+├── sandbox-state/         per project: OpenCode sessions, prompt and shell history, downloaded tools
 ├── cache/                 downloads, Hugging Face and pip caches, logs
 └── venv/                  Python environment for the Hugging Face CLI
 ```
@@ -93,7 +93,7 @@ The numbered steps below are the manual equivalent, and the reference for what t
 
 ```bash
 QCS=/home/tristanv/Development/qwen-coding-stack
-mkdir -p "$QCS"/{bin,config/opencode,models,sandbox/opencode-data,cache,venv}
+mkdir -p "$QCS"/{bin,config/opencode,models,sandbox,sandbox-state,cache,venv}
 cat > "$QCS/config/shell.sh" <<EOF
 # qwen-coding-stack: sourced from ~/.bashrc. Safe to source repeatedly.
 export QCS="$QCS"
@@ -396,11 +396,17 @@ for kv in "$@"; do
   echo "Set $k=$v"
 done
 "$QCS/bin/write-opencode-config"
-if systemctl is-enabled --quiet qwen-server 2>/dev/null; then
-  sudo systemctl reset-failed qwen-server 2>/dev/null || true
-  sudo systemctl restart qwen-server
-  echo "qwen-server service restarted"
-fi
+# Restart the service only if it's running (or failed): a server stopped with 'qwen-stack down' stays down.
+case "$(systemctl show -p ActiveState --value qwen-server 2>/dev/null || true)" in
+  active|activating|failed)
+    sudo systemctl reset-failed qwen-server 2>/dev/null || true
+    sudo systemctl restart qwen-server
+    echo "qwen-server service restarted" ;;
+  *)
+    if pgrep -ax llama-server | grep -qF "$QCS/llama.cpp/build/bin/llama-server"; then
+      echo "Restart the running server to apply this: qwen-stack down, then qwen-stack up --server"
+    fi ;;
+esac
 SCRIPT
 
 # --- find-ncmoe: finds the lowest NCMOE that fits in VRAM and saves it ---
@@ -411,7 +417,8 @@ cat > "$QCS/bin/find-ncmoe" <<'SCRIPT'
 set -uo pipefail
 QCS="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 [ $# -gt 0 ] || { echo "usage: find-ncmoe N [N ...]"; exit 1; }
-if systemctl is-active --quiet qwen-server 2>/dev/null; then sudo systemctl stop qwen-server; fi
+was_active=no
+if systemctl is-active --quiet qwen-server 2>/dev/null; then was_active=yes; sudo systemctl stop qwen-server; fi
 pkill -f "$QCS/llama.cpp/build/bin/llama-server" 2>/dev/null; sleep 2
 log="$QCS/cache/find-ncmoe.log"
 for n in "$@"; do
@@ -423,6 +430,7 @@ for n in "$@"; do
       kill "$pid"; wait "$pid" 2>/dev/null
       echo "  OK at $n. Saving NCMOE=$((n + 2)) (2 layers of headroom)."
       "$QCS/bin/qwen-set" NCMOE="$((n + 2))"
+      [ "$was_active" = no ] || sudo systemctl start qwen-server
       exit 0
     fi
     sleep 2
@@ -438,25 +446,195 @@ cat > "$QCS/bin/sandbox" <<'SCRIPT'
 #!/usr/bin/env bash
 # Usage: sandbox [project-dir] [command ...]
 #   sandbox                 OpenCode on the current directory
-#   sandbox ~/code/app bash a shell in the same sandbox
+#   sandbox ~/code/app bash a shell in the same sandbox (joins it if it's already open)
+# Each project keeps its OpenCode sessions, prompt and shell history, and the tools
+# OpenCode downloads in sandbox-state/<project>/, so the next session picks them up.
 set -euo pipefail
 QCS="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 PROJECT="$(realpath "${1:-$PWD}")"
 case "$PROJECT" in "$QCS"|"$QCS"/*) echo "Refusing to mount the stack's own directory." >&2; exit 1 ;; esac
 [ "$PROJECT" != "$HOME" ] || { echo "Refusing to mount your whole home directory." >&2; exit 1; }
-NAME="qcs-$(basename "$PROJECT" | tr -c 'a-zA-Z0-9_.-' '-')"
+ID="$(printf '%s' "${PROJECT##*/}" | tr -c 'a-zA-Z0-9_.-' '-')-$(printf '%s' "$PROJECT" | sha256sum | cut -c1-8)"
+NAME="qcs-$ID"
+STATE="$QCS/sandbox-state/$ID"
 docker image inspect qwen-coding-stack-sandbox:latest >/dev/null || {
-  echo "If the image is missing, build it: re-run install.sh, or the guide's 'Build the sandbox image' step." >&2
+  echo "If the image is missing, build it: qwen-stack build" >&2
   exit 1
 }
-exec docker run -it --rm --name "$NAME" \
+# Already open in another terminal: join that container.
+if [ "$(docker container inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" = true ]; then
+  [ $# -gt 1 ] || set -- . opencode
+  exec docker exec -it -w /workspace "$NAME" "${@:2}"
+fi
+mkdir -p "$STATE"/{data,state,cache}
+printf '%s\n' "$PROJECT" > "$STATE/path"
+exec docker run -it --rm --name "$NAME" --label "qwen-coding-stack.project=$PROJECT" \
   --cap-drop ALL --security-opt no-new-privileges --pids-limit 512 \
   --memory "${SANDBOX_MEMORY:-16g}" --cpus "${SANDBOX_CPUS:-8}" \
   -v "$PROJECT":/workspace \
-  -v "$QCS/config/opencode":/home/dev/.config/opencode:ro \
-  -v "$QCS/sandbox/opencode-data":/home/dev/.local/share/opencode \
+  -v "$QCS/config/opencode/opencode.json":/home/dev/.config/opencode/opencode.json:ro \
+  -v "$STATE/data":/home/dev/.local/share/opencode \
+  -v "$STATE/state":/home/dev/.local/state \
+  -v "$STATE/cache":/home/dev/.cache \
+  -e HISTFILE=/home/dev/.local/state/bash_history \
   -w /workspace \
   qwen-coding-stack-sandbox:latest "${@:2}"
+SCRIPT
+
+# --- qwen-stack: bring the server and a project's sandbox up, and take them down ---
+cat > "$QCS/bin/qwen-stack" <<'SCRIPT'
+#!/usr/bin/env bash
+# Day-to-day control of the stack. Nothing here deletes projects or saved sessions.
+#   qwen-stack up [DIR]            start the server if needed, then open OpenCode on DIR (default: .)
+#   qwen-stack up --server         only start the server
+#   qwen-stack shell [DIR]         a bash shell in DIR's sandbox (joins it if it's already open)
+#   qwen-stack down                close all sandboxes and stop the server (frees the GPU)
+#   qwen-stack status              server, GPU memory, open sandboxes, projects with saved sessions
+#   qwen-stack logs                follow the server log
+#   qwen-stack build [--no-cache]  build the sandbox image (--no-cache also updates OpenCode)
+#   qwen-stack boot on|off         start the server at boot, or not
+set -euo pipefail
+QCS="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+SVC=qwen-server; OTHER_SVC=qwen38-server
+IMAGE=qwen-coding-stack-sandbox:latest; LABEL=qwen-coding-stack.project
+SERVER_BIN="$QCS/llama.cpp/build/bin/llama-server"; SERVER_LOG="$QCS/cache/server.log"
+set -a; . "$QCS/config/server.env"; set +a
+URL="http://$HOST:$PORT"
+
+die() { echo "$*" >&2; exit 1; }
+has_service() { [ -f "/etc/systemd/system/$SVC.service" ]; }
+svc() { systemctl show -p "$1" --value "$SVC" 2>/dev/null || true; }
+# Our llama-server processes: named llama-server, started from this stack's build.
+server_pids() { pgrep -ax llama-server | grep -F "$SERVER_BIN" | cut -d' ' -f1 || true; }
+running() { [ -n "$(server_pids)" ]; }
+ready() { curl -sf "$URL/health" >/dev/null 2>&1; }
+server_log() {
+  if has_service; then sudo journalctl -u "$SVC" -n "$1" --no-pager; else tail -n "$1" "$SERVER_LOG"; fi
+}
+
+start_server() {
+  if ready; then echo "Server is up at $URL/v1"; return; fi
+  local pid="" others
+  ip -4 addr show docker0 2>/dev/null | grep -q "inet " \
+    || die "Docker isn't running (the server listens on its docker0 bridge): sudo systemctl start docker"
+  if has_service; then
+    if systemctl is-active --quiet "$OTHER_SVC" 2>/dev/null; then
+      echo "Stopping $OTHER_SVC first: only one model fits on the GPU."
+      sudo systemctl stop "$OTHER_SVC"
+    fi
+    sudo systemctl reset-failed "$SVC" 2>/dev/null || true
+    sudo systemctl start "$SVC"
+  elif ! running; then
+    nohup "$QCS/bin/qwen-server" > "$SERVER_LOG" 2>&1 < /dev/null &
+    pid=$!   # stays the same when qwen-server execs llama-server
+  fi
+  others=$(pgrep -ax llama-server | grep -vF "$SERVER_BIN" || true)
+  [ -z "$others" ] || printf 'Note: another llama-server is running and may hold GPU memory:\n%s\n' "$others" >&2
+  printf 'Loading the model'
+  for _ in $(seq 1 120); do
+    if ready; then printf '\nServer is up at %s/v1\n' "$URL"; return; fi
+    if has_service; then
+      case "$(svc ActiveState)/$(svc SubState)" in
+        active/*|activating/start*) ;;
+        *) echo; server_log 30 >&2; die "The server didn't start (log above). Full log: qwen-stack logs" ;;
+      esac
+    elif ! running && ! { [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; }; then
+      echo; server_log 30 >&2; die "The server exited (log above; full log: $SERVER_LOG)"
+    fi
+    printf .; sleep 3
+  done
+  echo; die "The server isn't answering after 6 minutes. Check: qwen-stack logs"
+}
+
+stop_all() {
+  local names
+  names=$(docker ps --filter "label=$LABEL" --format '{{.Names}}' 2>/dev/null || true)
+  if [ -n "$names" ]; then
+    echo "Closing sandboxes: $(echo "$names" | tr '\n' ' ')"
+    echo "$names" | xargs docker stop >/dev/null
+  fi
+  if has_service && [ "$(svc ActiveState)" != inactive ]; then
+    sudo systemctl stop "$SVC"
+    sudo systemctl reset-failed "$SVC" 2>/dev/null || true
+  fi
+  server_pids | xargs -r kill 2>/dev/null || true
+  for _ in $(seq 1 15); do running || break; sleep 1; done
+  ! running || die "llama-server is still running (PID $(server_pids | tr '\n' ' '))"
+  echo "Server stopped. Projects and saved sessions are untouched."
+}
+
+build_image() {
+  [ -f "$QCS/sandbox/Dockerfile" ] \
+    || die "$QCS/sandbox/Dockerfile is missing: re-run install.sh, or the guide's 'Build the sandbox image' step."
+  docker build "$@" -t "$IMAGE" --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" - < "$QCS/sandbox/Dockerfile"
+}
+
+ensure_image() {
+  docker image inspect "$IMAGE" >/dev/null 2>&1 && return
+  echo "The sandbox image isn't built yet. Building it now (first time only, a few minutes)."
+  build_image
+}
+
+status() {
+  local state=stopped f p
+  if ready; then state="ready at $URL/v1"
+  elif has_service && [ "$(svc ActiveState)" = failed ]; then state="failed (see: qwen-stack logs)"
+  elif running || { has_service && [ "$(svc ActiveState)" = activating ]; }; then state=loading
+  fi
+  echo "Server:      $state"
+  echo "Model:       $(basename "$MODEL" .gguf), context $CTX"
+  if has_service; then
+    echo "At boot:     $(systemctl is-enabled "$SVC" 2>/dev/null || true)  (change with: qwen-stack boot on|off)"
+  fi
+  if command -v nvidia-smi >/dev/null; then
+    echo "GPU memory:  $(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader | head -1 | sed 's/, / used of /')"
+  fi
+  echo "Open sandboxes:"
+  docker ps --filter "label=$LABEL" --format "{{.Label \"$LABEL\"}}  ({{.Status}})" 2>/dev/null | sed 's/^/  /' | grep . || echo "  none"
+  echo "Projects with saved sessions:"
+  for f in "$QCS"/sandbox-state/*/path; do
+    [ -f "$f" ] || { echo "  none"; break; }
+    p=$(cat "$f")
+    printf '  %s  (%s)%s\n' "$p" "$(du -sh "${f%/path}" | cut -f1)" "$([ -d "$p" ] || echo ', folder no longer exists')"
+  done
+}
+
+boot() {
+  has_service || die "No system service is installed (INSTALL_SERVICE=no), so nothing starts at boot."
+  case "${1:-}" in
+    on)
+      if systemctl is-enabled --quiet "$OTHER_SVC" 2>/dev/null; then
+        sudo systemctl disable --quiet "$OTHER_SVC"
+        echo "$OTHER_SVC no longer starts at boot (only one model fits on the GPU)."
+      fi
+      sudo systemctl enable --quiet "$SVC"
+      echo "$SVC starts at boot." ;;
+    off)
+      sudo systemctl disable --quiet "$SVC"
+      echo "$SVC no longer starts at boot. Start it when you need it: qwen-stack up" ;;
+    *) die "usage: qwen-stack boot on|off" ;;
+  esac
+}
+
+case "${1:-}" in
+  up)
+    if [ "${2:-}" = --server ]; then start_server; exit 0; fi
+    [ -d "${2:-.}" ] || die "No such directory: ${2:-.}"
+    ensure_image
+    start_server
+    exec "$QCS/bin/sandbox" "${2:-.}" ;;
+  shell) ensure_image; exec "$QCS/bin/sandbox" "${2:-.}" bash ;;
+  down) stop_all ;;
+  status) status ;;
+  logs)
+    if has_service; then exec sudo journalctl -u "$SVC" -n 50 -f; else exec tail -n 50 -F "$SERVER_LOG"; fi ;;
+  build)
+    case "${2:-}" in ""|--no-cache) ;; *) die "usage: qwen-stack build [--no-cache]" ;; esac
+    build_image ${2:+"$2"} ;;
+  boot) boot "${2:-}" ;;
+  ""|-h|--help|help) sed -n '2,10p' "$0" ;;
+  *) sed -n '2,10p' "$0" >&2; exit 1 ;;
+esac
 SCRIPT
 
 chmod +x "$QCS"/bin/*
@@ -469,7 +647,7 @@ Generate the OpenCode config from your settings, and check the commands are on y
 QCS=/home/tristanv/Development/qwen-coding-stack
 "$QCS/bin/write-opencode-config"
 . "$QCS/config/shell.sh"
-command -v qwen-server qwen-set find-ncmoe sandbox
+command -v qwen-server qwen-set find-ncmoe sandbox qwen-stack
 ```
 
 What the OpenCode config does:
@@ -477,7 +655,7 @@ What the OpenCode config does:
 - `"task": { "*": "deny" }` removes subagents from the model's tool list entirely, so it can't try to delegate. The `general`, `explore` and `scout` subagents are also disabled outright, as a second layer.
 - `small_model` and `"share": "disabled"` keep everything local. By default OpenCode sends session-title generation to a hosted model.
 - `edit` and `bash` set to `ask` means you approve each change and command. To change permissions, edit `bin/write-opencode-config` (the JSON file itself is regenerated by `qwen-set`).
-- The config is mounted **read-only** into sandboxes, so the model can't rewrite its own permissions.
+- `opencode.json` is mounted **read-only** into sandboxes, so the model can't rewrite its own permissions. The rest of `~/.config/opencode` stays writable inside the container, because OpenCode writes files there at startup.
 
 ---
 
@@ -600,7 +778,7 @@ The container runs as a non-root user whose UID matches yours, so files it creat
 
 ```bash
 QCS=/home/tristanv/Development/qwen-coding-stack
-mkdir -p "$QCS/sandbox/opencode-data"
+mkdir -p "$QCS/sandbox"
 cat > "$QCS/sandbox/Dockerfile" <<'EOF'
 FROM debian:bookworm-slim
 ARG UID=1000
@@ -636,22 +814,28 @@ If the OpenCode install script ever fails, replace that `RUN curl ...` line with
 
 ## 14. Daily use
 
-Start a session on a project (commit first; `git diff` / `git checkout .` is your undo button):
+Start a session on a project (commit first; `git diff` / `git checkout .` is your undo button). `qwen-stack up` starts the server if it isn't running, waits for the model to load, then opens OpenCode:
 
 ```bash
 cd /path/to/your/project
 git rev-parse --git-dir >/dev/null 2>&1 || git init
 git add -A && git commit -qm "checkpoint before AI session" || true
-sandbox
+qwen-stack up
 ```
 
-A shell in the same sandbox, to run tests yourself:
+`qwen-stack up ~/code/app` works from anywhere. Each project keeps its OpenCode sessions, so the next `up` on the same folder picks up where you left off.
 
 ```bash
-sandbox . bash
+qwen-stack shell ~/code/app   # a shell in that project's sandbox, to run tests yourself
+qwen-stack status             # server, GPU memory, open sandboxes, projects with saved sessions
+qwen-stack down               # close all sandboxes and stop the server (frees the GPU)
+qwen-stack boot off           # don't start the server at boot; 'qwen-stack up' starts it when needed
+qwen-stack logs               # follow the server log
 ```
 
-Look at or change server settings (changes restart the service and update OpenCode automatically):
+`down` deletes nothing: projects, saved sessions and settings stay as they are. `sandbox` still works on its own while the server is running.
+
+Look at or change server settings (changes update OpenCode and restart the server if it's running):
 
 ```bash
 qwen-set
@@ -673,6 +857,9 @@ sudo systemctl restart qwen-server
 
 Sandbox notes:
 
+- Each project's OpenCode sessions, prompt and shell history, and the tools OpenCode downloads are kept in `sandbox-state/<folder>-<id>/` and mounted again next time. The id comes from the folder's full path, so a moved or renamed project starts without them.
+- Running `sandbox` (or `qwen-stack shell`) on a project that's already open joins the same container; it closes when the first window closes.
+- Older versions kept every project's sessions together in `sandbox/opencode-data/`. To continue them in one project, copy them into its folder: `cp -a "$QCS/sandbox/opencode-data/." "$QCS"/sandbox-state/<folder>-<id>/data/` (run `qwen-stack up` on the project once first).
 - It mounts only the project folder, runs as a non-root user with all capabilities dropped, and refuses to mount your whole home directory or the stack itself.
 - Default limits are `--memory 16g --cpus 8`. Override per run: `SANDBOX_MEMORY=8g SANDBOX_CPUS=6 sandbox`.
 - The container has internet access (for `pip`/`npm`). For stricter isolation, create a dedicated Docker network and firewall its egress except to the server's address and port.
@@ -762,9 +949,9 @@ sudo journalctl -u qwen-server -n 150 --no-pager | grep -iE "error|fail|unable|c
 | Installer prints `Driver supports CUDA ;` (blank) or stops with "toolkit is newer than the driver" | Older installer couldn't read newer `nvidia-smi` output; `CUDA_VER=13` also installs the newest 13.x | Use the current installer (it asks the driver directly and fixes `CUDA_HOME` in `server.env`), set `CUDA_VER=auto`, and re-run `install.sh` |
 | Gibberish output | CUDA 13.2, or a KV-cache issue | Confirm `qwen-set` shows no 13.2 path; try `qwen-set EXTRA_ARGS="--cache-type-k bf16 --cache-type-v bf16"` |
 | Agent "forgets" the task / tool calls fail | Context too small or mismatched | `qwen-set` keeps OpenCode in sync; if you edited `opencode.json` by hand, run `write-opencode-config` |
-| `sandbox` says `No such image: qwen-coding-stack-sandbox:latest`, or `Unable to find image ... locally` then `denied` | The sandbox image was never built on this machine: the install stopped before that step, or the build failed | Run the **Build the sandbox image** step (or re-run `install.sh`); `docker images qwen-coding-stack-sandbox` should then list it |
+| `sandbox` says `No such image: qwen-coding-stack-sandbox:latest`, or `Unable to find image ... locally` then `denied` | The sandbox image was never built on this machine: the install stopped before that step, or the build failed | `qwen-stack build` (`qwen-stack up` also builds it when it's missing). If it says `sandbox/Dockerfile` is missing, run the **Build the sandbox image** step or re-run `install.sh` |
 | Container can't reach the server | Server not running, or HOST mismatch | `systemctl status qwen-server`; `. $QCS/config/server.env; curl http://$HOST:$PORT/v1/models` |
-| OpenCode errors writing its config | It wants to write to the read-only mount | Remove `:ro` from the config mount in `bin/sandbox` |
+| OpenCode stops at startup with `FileSystem.writeFile (/home/dev/.config/opencode/.gitignore)` | An older `bin/sandbox` mounted the whole config folder read-only, and current OpenCode writes files there | Re-run the **Install the project's commands** step (or `install.sh`); now only `opencode.json` is read-only |
 | Very slow generation | Too many experts in RAM, or other GPU apps | Re-run `find-ncmoe` with lower values; close GPU-heavy apps |
 | `nvidia-smi` fails after reboot | Secure Boot MOK not enrolled, or `nvidia-open` not installed | `sudo dmesg \| grep -i nvidia`; `mokutil --sb-state`; re-run the driver block |
 | Much slower than expected | On battery or power-saver, or desktop on the NVIDIA GPU | Plug in, `powerprofilesctl set performance`, check hybrid graphics |

@@ -31,7 +31,7 @@ Everything lives in one directory, separate from the Qwen3.6 stack so the two ne
 
 ```
 /home/tristanv/Development/qwen38-coding-stack/
-├── bin/                   commands: qwen38-server, qwen38-set, qwen38-find-fit, qwen38-sandbox, qwen38-write-opencode-config
+├── bin/                   commands: qwen38-server, qwen38-set, qwen38-find-fit, qwen38-sandbox, qwen38-stack, qwen38-write-opencode-config
 ├── config/
 │   ├── shell.sh           sourced by ~/.bashrc (adds bin/ to your PATH)
 │   ├── server.env         model, GPU layers, context, KV cache, reasoning effort (single source of truth)
@@ -41,8 +41,8 @@ Everything lives in one directory, separate from the Qwen3.6 stack so the two ne
 ├── llama.cpp/             llama.cpp source and build
 ├── models/                GGUF model files
 ├── sandbox/
-│   ├── Dockerfile         sandbox image
-│   └── opencode-data/     OpenCode sessions, kept between sandbox runs
+│   └── Dockerfile         sandbox image
+├── sandbox-state/         per project: OpenCode sessions, prompt and shell history, downloaded tools
 ├── cache/                 downloads, Hugging Face and pip caches, logs
 └── venv/                  Python environment for the Hugging Face CLI
 ```
@@ -81,7 +81,7 @@ The numbered steps below are the manual equivalent.
 
 ```bash
 Q38=/home/tristanv/Development/qwen38-coding-stack
-mkdir -p "$Q38"/{bin,config/opencode,models,sandbox/opencode-data,cache,venv}
+mkdir -p "$Q38"/{bin,config/opencode,models,sandbox,sandbox-state,cache,venv}
 cat > "$Q38/config/shell.sh" <<EOF
 # qwen38-coding-stack: sourced from ~/.bashrc. Safe to source repeatedly.
 export Q38="$Q38"
@@ -384,11 +384,17 @@ for kv in "$@"; do
   echo "Set $k=$v"
 done
 "$Q38/bin/qwen38-write-opencode-config"
-if systemctl is-enabled --quiet qwen38-server 2>/dev/null; then
-  sudo systemctl reset-failed qwen38-server 2>/dev/null || true
-  sudo systemctl restart qwen38-server
-  echo "qwen38-server service restarted"
-fi
+# Restart the service only if it's running (or failed): a server stopped with 'qwen38-stack down' stays down.
+case "$(systemctl show -p ActiveState --value qwen38-server 2>/dev/null || true)" in
+  active|activating|failed)
+    sudo systemctl reset-failed qwen38-server 2>/dev/null || true
+    sudo systemctl restart qwen38-server
+    echo "qwen38-server service restarted" ;;
+  *)
+    if pgrep -ax llama-server | grep -qF "$Q38/llama.cpp/build/bin/llama-server"; then
+      echo "Restart the running server to apply this: qwen38-stack down, then qwen38-stack up --server"
+    fi ;;
+esac
 SCRIPT
 
 # --- qwen38-find-fit: finds the largest context or GPU-layer count that fits in VRAM ---
@@ -402,7 +408,8 @@ Q38="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 mode=${1:-}; shift || true
 case "$mode" in ctx) KEY=CTX ;; ngl) KEY=NGL ;; *) echo "usage: qwen38-find-fit ctx|ngl N [N ...]"; exit 1 ;; esac
 [ $# -gt 0 ] || { echo "usage: qwen38-find-fit ctx|ngl N [N ...]"; exit 1; }
-if systemctl is-active --quiet qwen38-server 2>/dev/null; then sudo systemctl stop qwen38-server; fi
+was_active=no
+if systemctl is-active --quiet qwen38-server 2>/dev/null; then was_active=yes; sudo systemctl stop qwen38-server; fi
 pkill -f "$Q38/llama.cpp/build/bin/llama-server" 2>/dev/null; sleep 2
 log="$Q38/cache/find-fit.log"
 for n in "$@"; do
@@ -416,6 +423,7 @@ for n in "$@"; do
       if [ "$KEY" = NGL ] && [ "$n" -lt 99 ]; then save=$(( n > 2 ? n - 2 : 0 )); fi
       echo "  OK at $KEY=$n. Saving $KEY=$save."
       "$Q38/bin/qwen38-set" "$KEY=$save"
+      [ "$was_active" = no ] || sudo systemctl start qwen38-server
       exit 0
     fi
     sleep 2
@@ -431,25 +439,195 @@ cat > "$Q38/bin/qwen38-sandbox" <<'SCRIPT'
 #!/usr/bin/env bash
 # Usage: qwen38-sandbox [project-dir] [command ...]
 #   qwen38-sandbox                  OpenCode on the current directory
-#   qwen38-sandbox ~/code/app bash  a shell in the same sandbox
+#   qwen38-sandbox ~/code/app bash  a shell in the same sandbox (joins it if it's already open)
+# Each project keeps its OpenCode sessions, prompt and shell history, and the tools
+# OpenCode downloads in sandbox-state/<project>/, so the next session picks them up.
 set -euo pipefail
 Q38="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 PROJECT="$(realpath "${1:-$PWD}")"
 case "$PROJECT" in "$Q38"|"$Q38"/*) echo "Refusing to mount the stack's own directory." >&2; exit 1 ;; esac
 [ "$PROJECT" != "$HOME" ] || { echo "Refusing to mount your whole home directory." >&2; exit 1; }
-NAME="q38-$(basename "$PROJECT" | tr -c 'a-zA-Z0-9_.-' '-')"
+ID="$(printf '%s' "${PROJECT##*/}" | tr -c 'a-zA-Z0-9_.-' '-')-$(printf '%s' "$PROJECT" | sha256sum | cut -c1-8)"
+NAME="q38-$ID"
+STATE="$Q38/sandbox-state/$ID"
 docker image inspect qwen38-coding-stack-sandbox:latest >/dev/null || {
-  echo "If the image is missing, build it: re-run install.sh, or the guide's 'Build the sandbox image' step." >&2
+  echo "If the image is missing, build it: qwen38-stack build" >&2
   exit 1
 }
-exec docker run -it --rm --name "$NAME" \
+# Already open in another terminal: join that container.
+if [ "$(docker container inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" = true ]; then
+  [ $# -gt 1 ] || set -- . opencode
+  exec docker exec -it -w /workspace "$NAME" "${@:2}"
+fi
+mkdir -p "$STATE"/{data,state,cache}
+printf '%s\n' "$PROJECT" > "$STATE/path"
+exec docker run -it --rm --name "$NAME" --label "qwen38-coding-stack.project=$PROJECT" \
   --cap-drop ALL --security-opt no-new-privileges --pids-limit 512 \
   --memory "${SANDBOX_MEMORY:-16g}" --cpus "${SANDBOX_CPUS:-8}" \
   -v "$PROJECT":/workspace \
-  -v "$Q38/config/opencode":/home/dev/.config/opencode:ro \
-  -v "$Q38/sandbox/opencode-data":/home/dev/.local/share/opencode \
+  -v "$Q38/config/opencode/opencode.json":/home/dev/.config/opencode/opencode.json:ro \
+  -v "$STATE/data":/home/dev/.local/share/opencode \
+  -v "$STATE/state":/home/dev/.local/state \
+  -v "$STATE/cache":/home/dev/.cache \
+  -e HISTFILE=/home/dev/.local/state/bash_history \
   -w /workspace \
   qwen38-coding-stack-sandbox:latest "${@:2}"
+SCRIPT
+
+# --- qwen38-stack: bring the server and a project's sandbox up, and take them down ---
+cat > "$Q38/bin/qwen38-stack" <<'SCRIPT'
+#!/usr/bin/env bash
+# Day-to-day control of the stack. Nothing here deletes projects or saved sessions.
+#   qwen38-stack up [DIR]            start the server if needed, then open OpenCode on DIR (default: .)
+#   qwen38-stack up --server         only start the server
+#   qwen38-stack shell [DIR]         a bash shell in DIR's sandbox (joins it if it's already open)
+#   qwen38-stack down                close all sandboxes and stop the server (frees the GPU)
+#   qwen38-stack status              server, GPU memory, open sandboxes, projects with saved sessions
+#   qwen38-stack logs                follow the server log
+#   qwen38-stack build [--no-cache]  build the sandbox image (--no-cache also updates OpenCode)
+#   qwen38-stack boot on|off         start the server at boot, or not
+set -euo pipefail
+Q38="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+SVC=qwen38-server; OTHER_SVC=qwen-server
+IMAGE=qwen38-coding-stack-sandbox:latest; LABEL=qwen38-coding-stack.project
+SERVER_BIN="$Q38/llama.cpp/build/bin/llama-server"; SERVER_LOG="$Q38/cache/server.log"
+set -a; . "$Q38/config/server.env"; set +a
+URL="http://$HOST:$PORT"
+
+die() { echo "$*" >&2; exit 1; }
+has_service() { [ -f "/etc/systemd/system/$SVC.service" ]; }
+svc() { systemctl show -p "$1" --value "$SVC" 2>/dev/null || true; }
+# Our llama-server processes: named llama-server, started from this stack's build.
+server_pids() { pgrep -ax llama-server | grep -F "$SERVER_BIN" | cut -d' ' -f1 || true; }
+running() { [ -n "$(server_pids)" ]; }
+ready() { curl -sf "$URL/health" >/dev/null 2>&1; }
+server_log() {
+  if has_service; then sudo journalctl -u "$SVC" -n "$1" --no-pager; else tail -n "$1" "$SERVER_LOG"; fi
+}
+
+start_server() {
+  if ready; then echo "Server is up at $URL/v1"; return; fi
+  local pid="" others
+  ip -4 addr show docker0 2>/dev/null | grep -q "inet " \
+    || die "Docker isn't running (the server listens on its docker0 bridge): sudo systemctl start docker"
+  if has_service; then
+    if systemctl is-active --quiet "$OTHER_SVC" 2>/dev/null; then
+      echo "Stopping $OTHER_SVC first: only one model fits on the GPU."
+      sudo systemctl stop "$OTHER_SVC"
+    fi
+    sudo systemctl reset-failed "$SVC" 2>/dev/null || true
+    sudo systemctl start "$SVC"
+  elif ! running; then
+    nohup "$Q38/bin/qwen38-server" > "$SERVER_LOG" 2>&1 < /dev/null &
+    pid=$!   # stays the same when qwen38-server execs llama-server
+  fi
+  others=$(pgrep -ax llama-server | grep -vF "$SERVER_BIN" || true)
+  [ -z "$others" ] || printf 'Note: another llama-server is running and may hold GPU memory:\n%s\n' "$others" >&2
+  printf 'Loading the model'
+  for _ in $(seq 1 120); do
+    if ready; then printf '\nServer is up at %s/v1\n' "$URL"; return; fi
+    if has_service; then
+      case "$(svc ActiveState)/$(svc SubState)" in
+        active/*|activating/start*) ;;
+        *) echo; server_log 30 >&2; die "The server didn't start (log above). Full log: qwen38-stack logs" ;;
+      esac
+    elif ! running && ! { [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; }; then
+      echo; server_log 30 >&2; die "The server exited (log above; full log: $SERVER_LOG)"
+    fi
+    printf .; sleep 3
+  done
+  echo; die "The server isn't answering after 6 minutes. Check: qwen38-stack logs"
+}
+
+stop_all() {
+  local names
+  names=$(docker ps --filter "label=$LABEL" --format '{{.Names}}' 2>/dev/null || true)
+  if [ -n "$names" ]; then
+    echo "Closing sandboxes: $(echo "$names" | tr '\n' ' ')"
+    echo "$names" | xargs docker stop >/dev/null
+  fi
+  if has_service && [ "$(svc ActiveState)" != inactive ]; then
+    sudo systemctl stop "$SVC"
+    sudo systemctl reset-failed "$SVC" 2>/dev/null || true
+  fi
+  server_pids | xargs -r kill 2>/dev/null || true
+  for _ in $(seq 1 15); do running || break; sleep 1; done
+  ! running || die "llama-server is still running (PID $(server_pids | tr '\n' ' '))"
+  echo "Server stopped. Projects and saved sessions are untouched."
+}
+
+build_image() {
+  [ -f "$Q38/sandbox/Dockerfile" ] \
+    || die "$Q38/sandbox/Dockerfile is missing: re-run install.sh, or the guide's 'Build the sandbox image' step."
+  docker build "$@" -t "$IMAGE" --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" - < "$Q38/sandbox/Dockerfile"
+}
+
+ensure_image() {
+  docker image inspect "$IMAGE" >/dev/null 2>&1 && return
+  echo "The sandbox image isn't built yet. Building it now (first time only, a few minutes)."
+  build_image
+}
+
+status() {
+  local state=stopped f p
+  if ready; then state="ready at $URL/v1"
+  elif has_service && [ "$(svc ActiveState)" = failed ]; then state="failed (see: qwen38-stack logs)"
+  elif running || { has_service && [ "$(svc ActiveState)" = activating ]; }; then state=loading
+  fi
+  echo "Server:      $state"
+  echo "Model:       $(basename "$MODEL" .gguf), context $CTX"
+  if has_service; then
+    echo "At boot:     $(systemctl is-enabled "$SVC" 2>/dev/null || true)  (change with: qwen38-stack boot on|off)"
+  fi
+  if command -v nvidia-smi >/dev/null; then
+    echo "GPU memory:  $(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader | head -1 | sed 's/, / used of /')"
+  fi
+  echo "Open sandboxes:"
+  docker ps --filter "label=$LABEL" --format "{{.Label \"$LABEL\"}}  ({{.Status}})" 2>/dev/null | sed 's/^/  /' | grep . || echo "  none"
+  echo "Projects with saved sessions:"
+  for f in "$Q38"/sandbox-state/*/path; do
+    [ -f "$f" ] || { echo "  none"; break; }
+    p=$(cat "$f")
+    printf '  %s  (%s)%s\n' "$p" "$(du -sh "${f%/path}" | cut -f1)" "$([ -d "$p" ] || echo ', folder no longer exists')"
+  done
+}
+
+boot() {
+  has_service || die "No system service is installed (INSTALL_SERVICE=no), so nothing starts at boot."
+  case "${1:-}" in
+    on)
+      if systemctl is-enabled --quiet "$OTHER_SVC" 2>/dev/null; then
+        sudo systemctl disable --quiet "$OTHER_SVC"
+        echo "$OTHER_SVC no longer starts at boot (only one model fits on the GPU)."
+      fi
+      sudo systemctl enable --quiet "$SVC"
+      echo "$SVC starts at boot." ;;
+    off)
+      sudo systemctl disable --quiet "$SVC"
+      echo "$SVC no longer starts at boot. Start it when you need it: qwen38-stack up" ;;
+    *) die "usage: qwen38-stack boot on|off" ;;
+  esac
+}
+
+case "${1:-}" in
+  up)
+    if [ "${2:-}" = --server ]; then start_server; exit 0; fi
+    [ -d "${2:-.}" ] || die "No such directory: ${2:-.}"
+    ensure_image
+    start_server
+    exec "$Q38/bin/qwen38-sandbox" "${2:-.}" ;;
+  shell) ensure_image; exec "$Q38/bin/qwen38-sandbox" "${2:-.}" bash ;;
+  down) stop_all ;;
+  status) status ;;
+  logs)
+    if has_service; then exec sudo journalctl -u "$SVC" -n 50 -f; else exec tail -n 50 -F "$SERVER_LOG"; fi ;;
+  build)
+    case "${2:-}" in ""|--no-cache) ;; *) die "usage: qwen38-stack build [--no-cache]" ;; esac
+    build_image ${2:+"$2"} ;;
+  boot) boot "${2:-}" ;;
+  ""|-h|--help|help) sed -n '2,10p' "$0" ;;
+  *) sed -n '2,10p' "$0" >&2; exit 1 ;;
+esac
 SCRIPT
 
 chmod +x "$Q38"/bin/*
@@ -462,7 +640,7 @@ Generate the OpenCode config from your settings, and check the commands are on y
 Q38=/home/tristanv/Development/qwen38-coding-stack
 "$Q38/bin/qwen38-write-opencode-config"
 . "$Q38/config/shell.sh"
-command -v qwen38-server qwen38-set qwen38-find-fit qwen38-sandbox
+command -v qwen38-server qwen38-set qwen38-find-fit qwen38-sandbox qwen38-stack
 ```
 
 The OpenCode config is the same as the Qwen3.6 stack's: subagents are removed from the model's tool list (`"task": { "*": "deny" }`) and disabled outright, everything stays local (`small_model`, `"share": "disabled"`), edits and commands need your approval, and the file is mounted read-only into sandboxes. To change permissions, edit `bin/qwen38-write-opencode-config`.
@@ -581,7 +759,7 @@ sudo journalctl -u qwen38-server -n 60 --no-pager
 
 ```bash
 Q38=/home/tristanv/Development/qwen38-coding-stack
-mkdir -p "$Q38/sandbox/opencode-data"
+mkdir -p "$Q38/sandbox"
 cat > "$Q38/sandbox/Dockerfile" <<'EOF'
 FROM debian:bookworm-slim
 ARG UID=1000
@@ -609,15 +787,25 @@ To update OpenCode later, add `--no-cache` to the `docker build` line.
 
 ## 14. Daily use
 
+`qwen38-stack up` starts the server if it isn't running (stopping the Qwen3.6 one), waits for the model to load, then opens OpenCode on the project:
+
 ```bash
 cd /path/to/your/project
 git rev-parse --git-dir >/dev/null 2>&1 || git init
 git add -A && git commit -qm "checkpoint before AI session" || true
-qwen38-sandbox
+qwen38-stack up
+```
+
+`qwen38-stack up ~/code/app` works from anywhere. Each project keeps its OpenCode sessions, prompt and shell history in `sandbox-state/<folder>-<id>/`, so the next `up` on the same folder picks up where you left off (a moved or renamed project starts fresh). `down` deletes nothing. Sessions from older versions are in `sandbox/opencode-data/`; copy them into a project's `sandbox-state/<folder>-<id>/data/` to continue them there.
+
+```bash
+qwen38-stack shell ~/code/app   # a shell in that project's sandbox (joins it if it's open)
+qwen38-stack status             # server, GPU memory, open sandboxes, projects with saved sessions
+qwen38-stack down               # close all sandboxes and stop the server (frees the GPU)
+qwen38-stack boot off           # don't start the server at boot
 ```
 
 ```bash
-qwen38-sandbox . bash          # a shell in the same sandbox
 qwen38-set                     # show settings
 qwen38-set REASONING_EFFORT=low   # shorter thinking, faster turns
 systemctl status qwen38-server --no-pager
@@ -630,23 +818,23 @@ Sandbox limits default to `--memory 16g --cpus 8`; override per run with `SANDBO
 Only one model fits on the GPU at a time. The services conflict, so starting one stops the other:
 
 ```bash
-# Use Qwen3.6-35B-A3B (port 8080, commands: sandbox, qwen-set)
-sudo systemctl start qwen-server
+# Use Qwen3.6-35B-A3B (port 8080, commands: qwen-stack, sandbox, qwen-set)
+qwen-stack up --server
 ```
 
 ```bash
-# Use Qwen3.8-27B (port 8081, commands: qwen38-sandbox, qwen38-set)
-sudo systemctl start qwen38-server
+# Use Qwen3.8-27B (port 8081, commands: qwen38-stack, qwen38-sandbox, qwen38-set)
+qwen38-stack up --server
 ```
 
-To change which one starts at boot:
+To change which one starts at boot (this also stops the other one starting at boot):
 
 ```bash
-sudo systemctl disable qwen38-server && sudo systemctl enable qwen-server     # boot into Qwen3.6
+qwen-stack boot on       # boot into Qwen3.6
 ```
 
 ```bash
-sudo systemctl disable qwen-server && sudo systemctl enable qwen38-server     # boot into Qwen3.8
+qwen38-stack boot on     # boot into Qwen3.8
 ```
 
 ---
@@ -695,7 +883,7 @@ sudo journalctl -u qwen38-server -n 150 --no-pager | grep -iE "error|fail|unable
 | Gibberish output | CUDA 13.2, or quantized context cache | Confirm no 13.2 path in `qwen38-set`; try `qwen38-set CACHE_TYPE=bf16` (uses twice the cache memory; lower `CTX` to match) |
 | Very long pauses before answers | The model is thinking | `qwen38-set REASONING_EFFORT=low` (or `none`) |
 | Agent forgets the task / tool calls fail | Context too small | Raise `CTX` if `qwen38-find-fit ctx` shows room; keep `qwen38-set` as the only way to change it |
-| `qwen38-sandbox` says `No such image: qwen38-coding-stack-sandbox:latest`, or `Unable to find image ... locally` then `denied` | The sandbox image was never built on this machine: the install stopped before that step, or the build failed | Run the **Build the sandbox image** step (or re-run `install.sh`); `docker images qwen38-coding-stack-sandbox` should then list it |
+| `qwen38-sandbox` says `No such image: qwen38-coding-stack-sandbox:latest`, or `Unable to find image ... locally` then `denied` | The sandbox image was never built on this machine: the install stopped before that step, or the build failed | `qwen38-stack build` (`qwen38-stack up` also builds it when it's missing). If it says `sandbox/Dockerfile` is missing, run the **Build the sandbox image** step or re-run `install.sh` |
 | Container can't reach the server | Server not running, or wrong stack's service is active | `systemctl status qwen38-server`; `. $Q38/config/server.env; curl http://$HOST:$PORT/v1/models` |
 | Much slower than expected | On battery or power-saver, or desktop on the NVIDIA GPU | Plug in, `powerprofilesctl set performance`, check hybrid graphics |
 

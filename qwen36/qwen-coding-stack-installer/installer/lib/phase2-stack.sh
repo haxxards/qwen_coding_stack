@@ -46,7 +46,7 @@ sync_cuda_home() {
 
 setup_project_dir() {
   log "Project directory: $QCS"
-  mkdir -p "$QCS"/{bin,config/opencode,models,sandbox/opencode-data,cache,venv}
+  mkdir -p "$QCS"/{bin,config/opencode,models,sandbox,sandbox-state,cache,venv}
   cat > "$QCS/config/shell.sh" <<SH
 # qwen-coding-stack: sourced from ~/.bashrc. Safe to source repeatedly.
 export QCS="$QCS"
@@ -273,10 +273,11 @@ summary() {
   grep -E '^[A-Z_]+=' "$QCS/config/server.env" | sed 's/^/      /'
   info ""
   info "Open a new terminal (or run: . $QCS/config/shell.sh), then:"
-  info "  cd /path/to/your/project && sandbox        # OpenCode in a sandbox"
-  info "  sandbox . bash                             # shell in the same sandbox"
+  info "  qwen-stack up /path/to/your/project        # start the server, open OpenCode on the project"
+  info "  qwen-stack shell /path/to/your/project     # shell in the same sandbox"
+  info "  qwen-stack down                            # stop it all when done (frees the GPU)"
+  info "  qwen-stack status                          # what's running"
   info "  qwen-set                                   # show / change server settings"
-  info "  systemctl status qwen-server               # service status"
   [ "$PROFILE" = popos-desktop ] && info "  $QCS/installer/install.sh --cleanup-old   # remove the earlier manual setup's files"
   info ""
   info "Full log: $LOG"

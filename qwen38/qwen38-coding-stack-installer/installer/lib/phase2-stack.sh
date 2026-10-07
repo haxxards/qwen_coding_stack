@@ -45,7 +45,7 @@ sync_cuda_home() {
 
 setup_project_dir() {
   log "Project directory: $Q38"
-  mkdir -p "$Q38"/{bin,config/opencode,models,sandbox/opencode-data,cache,venv}
+  mkdir -p "$Q38"/{bin,config/opencode,models,sandbox,sandbox-state,cache,venv}
   cat > "$Q38/config/shell.sh" <<SH
 # qwen38-coding-stack: sourced from ~/.bashrc. Safe to source repeatedly.
 export Q38="$Q38"
@@ -259,11 +259,12 @@ summary() {
   grep -E '^[A-Z_]+=' "$Q38/config/server.env" | sed 's/^/      /'
   info ""
   info "Open a new terminal (or run: . $Q38/config/shell.sh), then:"
-  info "  cd /path/to/your/project && qwen38-sandbox   # OpenCode in a sandbox"
-  info "  qwen38-sandbox . bash                        # shell in the same sandbox"
-  info "  qwen38-set                                   # show / change settings"
-  info "  sudo systemctl start qwen-server             # switch back to Qwen3.6 (stops Qwen3.8)"
-  info "  sudo systemctl start qwen38-server           # switch to Qwen3.8 (stops Qwen3.6)"
+  info "  qwen38-stack up /path/to/your/project      # start the server, open OpenCode on the project"
+  info "  qwen38-stack shell /path/to/your/project   # shell in the same sandbox"
+  info "  qwen38-stack down                          # stop it all when done (frees the GPU)"
+  info "  qwen38-stack status                        # what's running"
+  info "  qwen38-set                                 # show / change settings"
+  info "  qwen-stack up --server                     # switch back to Qwen3.6 (stops Qwen3.8)"
   info ""
   info "Full log: $LOG"
 }
