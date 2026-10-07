@@ -104,8 +104,12 @@ download_model() {
     python3 -m venv "$QCS/venv"
     PIP_CACHE_DIR="$QCS/cache/pip" "$QCS/venv/bin/pip" install -q -U huggingface_hub
   fi
+  # hf hides its progress bars unless stderr is a terminal, and start_logging sends
+  # all output through tee, so give hf the terminal (fd 3). Without this the
+  # download shows only "Fetching N files: 0%" until it finishes.
   HF_HOME="$QCS/cache/huggingface" "$QCS/venv/bin/hf" download unsloth/Qwen3.6-35B-A3B-GGUF \
-    --local-dir "$MODEL_DIR" --include "*UD-Q4_K_XL*"
+    --local-dir "$MODEL_DIR" --include "*UD-Q4_K_XL*" 2>&3 \
+    || die "Model download failed (hf's messages are on screen, not in the log). Re-run to resume."
   [ -f "$MODEL_FILE" ] || die "Expected model file not found: $MODEL_FILE (see: ls $MODEL_DIR)"
 }
 

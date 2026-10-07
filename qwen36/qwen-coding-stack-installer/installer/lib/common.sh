@@ -55,6 +55,7 @@ load_config() {
 start_logging() {
   mkdir -p "$QCS/cache"
   LOG="$QCS/cache/install-$(date +%Y%m%d-%H%M%S).log"
+  exec 3>&2   # the terminal itself, for download progress bars (see download_model)
   exec > >(tee -a "$LOG") 2>&1
   log "qwen-coding-stack installer — profile: $PROFILE — log: $LOG"
 }
