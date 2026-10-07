@@ -160,6 +160,10 @@ PROJECT="$(realpath "${1:-$PWD}")"
 case "$PROJECT" in "$Q38"|"$Q38"/*) echo "Refusing to mount the stack's own directory." >&2; exit 1 ;; esac
 [ "$PROJECT" != "$HOME" ] || { echo "Refusing to mount your whole home directory." >&2; exit 1; }
 NAME="q38-$(basename "$PROJECT" | tr -c 'a-zA-Z0-9_.-' '-')"
+docker image inspect qwen38-coding-stack-sandbox:latest >/dev/null || {
+  echo "If the image is missing, build it: re-run install.sh, or the guide's 'Build the sandbox image' step." >&2
+  exit 1
+}
 exec docker run -it --rm --name "$NAME" \
   --cap-drop ALL --security-opt no-new-privileges --pids-limit 512 \
   --memory "${SANDBOX_MEMORY:-@@SBMEM@@}" --cpus "${SANDBOX_CPUS:-@@SBCPU@@}" \

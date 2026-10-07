@@ -445,6 +445,10 @@ PROJECT="$(realpath "${1:-$PWD}")"
 case "$PROJECT" in "$QCS"|"$QCS"/*) echo "Refusing to mount the stack's own directory." >&2; exit 1 ;; esac
 [ "$PROJECT" != "$HOME" ] || { echo "Refusing to mount your whole home directory." >&2; exit 1; }
 NAME="qcs-$(basename "$PROJECT" | tr -c 'a-zA-Z0-9_.-' '-')"
+docker image inspect qwen-coding-stack-sandbox:latest >/dev/null || {
+  echo "If the image is missing, build it: re-run install.sh, or the guide's 'Build the sandbox image' step." >&2
+  exit 1
+}
 exec docker run -it --rm --name "$NAME" \
   --cap-drop ALL --security-opt no-new-privileges --pids-limit 512 \
   --memory "${SANDBOX_MEMORY:-16g}" --cpus "${SANDBOX_CPUS:-8}" \
@@ -758,6 +762,7 @@ sudo journalctl -u qwen-server -n 150 --no-pager | grep -iE "error|fail|unable|c
 | Installer prints `Driver supports CUDA ;` (blank) or stops with "toolkit is newer than the driver" | Older installer couldn't read newer `nvidia-smi` output; `CUDA_VER=13` also installs the newest 13.x | Use the current installer (it asks the driver directly and fixes `CUDA_HOME` in `server.env`), set `CUDA_VER=auto`, and re-run `install.sh` |
 | Gibberish output | CUDA 13.2, or a KV-cache issue | Confirm `qwen-set` shows no 13.2 path; try `qwen-set EXTRA_ARGS="--cache-type-k bf16 --cache-type-v bf16"` |
 | Agent "forgets" the task / tool calls fail | Context too small or mismatched | `qwen-set` keeps OpenCode in sync; if you edited `opencode.json` by hand, run `write-opencode-config` |
+| `sandbox` says `No such image: qwen-coding-stack-sandbox:latest`, or `Unable to find image ... locally` then `denied` | The sandbox image was never built on this machine: the install stopped before that step, or the build failed | Run the **Build the sandbox image** step (or re-run `install.sh`); `docker images qwen-coding-stack-sandbox` should then list it |
 | Container can't reach the server | Server not running, or HOST mismatch | `systemctl status qwen-server`; `. $QCS/config/server.env; curl http://$HOST:$PORT/v1/models` |
 | OpenCode errors writing its config | It wants to write to the read-only mount | Remove `:ro` from the config mount in `bin/sandbox` |
 | Very slow generation | Too many experts in RAM, or other GPU apps | Re-run `find-ncmoe` with lower values; close GPU-heavy apps |

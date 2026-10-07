@@ -421,6 +421,10 @@ PROJECT="$(realpath "${1:-$PWD}")"
 case "$PROJECT" in "$Q38"|"$Q38"/*) echo "Refusing to mount the stack's own directory." >&2; exit 1 ;; esac
 [ "$PROJECT" != "$HOME" ] || { echo "Refusing to mount your whole home directory." >&2; exit 1; }
 NAME="q38-$(basename "$PROJECT" | tr -c 'a-zA-Z0-9_.-' '-')"
+docker image inspect qwen38-coding-stack-sandbox:latest >/dev/null || {
+  echo "If the image is missing, build it: re-run install.sh, or the guide's 'Build the sandbox image' step." >&2
+  exit 1
+}
 exec docker run -it --rm --name "$NAME" \
   --cap-drop ALL --security-opt no-new-privileges --pids-limit 512 \
   --memory "${SANDBOX_MEMORY:-6g}" --cpus "${SANDBOX_CPUS:-4}" \
@@ -622,6 +626,7 @@ sudo journalctl -u qwen38-server -n 150 --no-pager | grep -iE "error|fail|unable
 | Gibberish output | CUDA 13.2, or quantized context cache | Confirm no 13.2 path in `qwen38-set`; try `qwen38-set CACHE_TYPE=bf16` (uses twice the cache memory; lower `CTX` to match) |
 | Very long pauses before answers | The model is thinking | `qwen38-set REASONING_EFFORT=low` (or `none`) |
 | Agent forgets the task / tool calls fail | Context too small | Raise `CTX` if `qwen38-find-fit ctx` shows room; keep `qwen38-set` as the only way to change it |
+| `qwen38-sandbox` says `No such image: qwen38-coding-stack-sandbox:latest`, or `Unable to find image ... locally` then `denied` | The sandbox image was never built on this machine: the install stopped before that step, or the build failed | Run the **Build the sandbox image** step (or re-run `install.sh`); `docker images qwen38-coding-stack-sandbox` should then list it |
 | Container can't reach the server | Server not running, or wrong stack's service is active | `systemctl status qwen38-server`; `. $Q38/config/server.env; curl http://$HOST:$PORT/v1/models` |
 
 ### GPU out of memory
