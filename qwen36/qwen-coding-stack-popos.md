@@ -543,7 +543,11 @@ stop_all() {
 build_image() {
   [ -f "$QCS/sandbox/Dockerfile" ] \
     || die "$QCS/sandbox/Dockerfile is missing: re-run install.sh, or the guide's 'Build the sandbox image' step."
-  docker build "$@" -t "$IMAGE" --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" - < "$QCS/sandbox/Dockerfile"
+  # --load: a docker-container builder otherwise keeps the image in its build cache only.
+  local build=(docker build)
+  docker buildx version >/dev/null 2>&1 && build=(docker buildx build --load)
+  "${build[@]}" "$@" -t "$IMAGE" --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" - < "$QCS/sandbox/Dockerfile"
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || die "The build finished but Docker has no $IMAGE image; see the output above."
 }
 
 ensure_image() {
@@ -749,18 +753,10 @@ RUN mkdir -p /home/dev/.config/opencode /home/dev/.local/share/opencode
 WORKDIR /workspace
 CMD ["opencode"]
 EOF
-docker build -t qwen-coding-stack-sandbox:latest \
-  --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" \
-  "$QCS/sandbox"
+"$QCS/bin/qwen-stack" build
 ```
 
-To update OpenCode later, rebuild without the cache:
-
-```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
-docker build --no-cache -t qwen-coding-stack-sandbox:latest \
-  --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" "$QCS/sandbox"
-```
+To update OpenCode later: `qwen-stack build --no-cache`.
 
 If the OpenCode install script ever fails, replace that `RUN curl ...` line with `RUN npm config set prefix ~/.npm-global && npm i -g opencode-ai` and set `ENV PATH="/home/dev/.npm-global/bin:${PATH}"`.
 
@@ -792,11 +788,7 @@ systemctl status qwen-server --no-pager
 sudo journalctl -u qwen-server -n 60 --no-pager
 ```
 
-Update everything (llama.cpp, OpenCode in the image) by re-running the **Build llama.cpp** and **Build the sandbox image** steps, then:
-
-```bash
-sudo systemctl restart qwen-server
-```
+Update everything (llama.cpp, OpenCode in the image) with `installer/install.sh --update`.
 
 Sandbox notes:
 

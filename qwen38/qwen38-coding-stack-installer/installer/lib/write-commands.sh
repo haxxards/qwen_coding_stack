@@ -281,7 +281,11 @@ stop_all() {
 build_image() {
   [ -f "$Q38/sandbox/Dockerfile" ] \
     || die "$Q38/sandbox/Dockerfile is missing: re-run install.sh, or the guide's 'Build the sandbox image' step."
-  docker build "$@" -t "$IMAGE" --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" - < "$Q38/sandbox/Dockerfile"
+  # --load: a docker-container builder otherwise keeps the image in its build cache only.
+  local build=(docker build)
+  docker buildx version >/dev/null 2>&1 && build=(docker buildx build --load)
+  "${build[@]}" "$@" -t "$IMAGE" --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" - < "$Q38/sandbox/Dockerfile"
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || die "The build finished but Docker has no $IMAGE image; see the output above."
 }
 
 ensure_image() {

@@ -161,8 +161,12 @@ DOCKER
     return
   fi
   log "Building sandbox image"
-  docker build "${opts[@]}" --label "qcs.dockerfile=$hash" -t qwen38-coding-stack-sandbox:latest \
+  # --load: a docker-container builder otherwise keeps the image in its build cache only.
+  local build=(docker build)
+  docker buildx version >/dev/null 2>&1 && build=(docker buildx build --load)
+  "${build[@]}" "${opts[@]}" --label "qcs.dockerfile=$hash" -t qwen38-coding-stack-sandbox:latest \
     --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" "$Q38/sandbox"
+  docker image inspect qwen38-coding-stack-sandbox:latest >/dev/null 2>&1 || die "The build finished but Docker has no qwen38-coding-stack-sandbox:latest image; see the output above."
 }
 
 install_service() {
