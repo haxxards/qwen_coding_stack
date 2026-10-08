@@ -57,23 +57,7 @@ Outside it: apt packages and apt settings, the service file `/etc/systemd/system
 
 ## Automated install (optional)
 
-`qwen38-coding-stack-installer.tar.gz` runs every step of this guide, in two phases separated by one reboot (phase 1 is a no-op if the Qwen3.6 stack is already installed, so no reboot is needed in that case):
-
-| Phase | What it does |
-|---|---|
-| 1 (system) | Base packages, `contrib`/`non-free` components, NVIDIA's open driver and repo, power-profiles-daemon, CUDA toolkit, Docker. Reboots (or asks first) if the driver or docker group needs it. |
-| 2 (project) | Project directory, llama.cpp build, model download, settings, commands, sandbox image, system service (disabling the Qwen3.6 service at boot), performance power profile, GPU check, GPU-layer fitting, CPU thread benchmarking, and a final check that the server answers. |
-
-```bash
-mkdir -p /home/tristanv/Development/qwen38-coding-stack
-tar -xzf ~/Downloads/qwen38-coding-stack-installer.tar.gz -C /home/tristanv/Development/qwen38-coding-stack
-nano /home/tristanv/Development/qwen38-coding-stack/installer/install.conf     # optional
-/home/tristanv/Development/qwen38-coding-stack/installer/install.sh
-```
-
-If it reboots, run the same `install.sh` command again afterwards. With Secure Boot on, complete the blue **MOK management** screen at that reboot (**Enroll MOK → Continue → Yes**, then the password you chose). Every run logs to `cache/install-<date>.log`, and re-running never overwrites your tuned `server.env` (fitting reruns only with `RETUNE=yes`).
-
-The numbered steps below are the manual equivalent.
+`installer/install.sh` runs every numbered step below; see the [README](../README.md).
 
 ---
 
@@ -796,12 +780,12 @@ git add -A && git commit -qm "checkpoint before AI session" || true
 qwen38-stack up
 ```
 
-`qwen38-stack up ~/code/app` works from anywhere. Each project keeps its OpenCode sessions, prompt and shell history in `sandbox-state/<folder>-<id>/`, so the next `up` on the same folder picks up where you left off (a moved or renamed project starts fresh). `down` deletes nothing. Sessions from older versions are in `sandbox/opencode-data/`; copy them into a project's `sandbox-state/<folder>-<id>/data/` to continue them there.
+Each project keeps its sessions and history in `sandbox-state/<folder>-<id>/` (a moved or renamed project starts fresh); sessions from before that are in `sandbox/opencode-data/`.
 
 ```bash
 qwen38-stack shell ~/code/app   # a shell in that project's sandbox (joins it if it's open)
 qwen38-stack status             # server, GPU memory, open sandboxes, projects with saved sessions
-qwen38-stack down               # close all sandboxes and stop the server (frees the GPU)
+qwen38-stack down               # close all sandboxes, stop the server, free the GPU; deletes nothing
 qwen38-stack boot off           # don't start the server at boot
 ```
 

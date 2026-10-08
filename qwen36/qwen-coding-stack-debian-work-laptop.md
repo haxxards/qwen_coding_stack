@@ -47,45 +47,7 @@ The only things placed outside it are system-level integration that can't live i
 
 ## Automated install (optional)
 
-`qwen-coding-stack-installer.tar.gz` runs every step of this guide for you. It's built from the same commands, so the result is identical, and like the guide it's safe to re-run at any time.
-
-It runs in two phases, separated by one reboot:
-
-| Phase | What it does |
-|---|---|
-| 1 (system) | Base packages, `contrib`/`non-free` components, NVIDIA's open driver and repo, power-profiles-daemon, CUDA toolkit, Docker. Then reboots (or asks first), because the driver and the docker group only take effect after a reboot. |
-| 2 (project) | Project directory, llama.cpp build, model download, settings, commands, sandbox image, system service, performance power profile, a check that the desktop isn't on the NVIDIA GPU, `find-ncmoe` tuning (falls back to a smaller context, then automatic fitting), CPU thread benchmarking, and a final check that the server answers. |
-
-**1. Unpack it into the project directory:**
-
-```bash
-mkdir -p /home/tristanv/Development/qwen-coding-stack
-tar -xzf ~/Downloads/qwen-coding-stack-installer.tar.gz -C /home/tristanv/Development/qwen-coding-stack
-```
-
-**2. Review the settings** (every value has a comment; empty values use this machine's defaults):
-
-```bash
-nano /home/tristanv/Development/qwen-coding-stack/installer/install.conf
-```
-
-**3. Run it** as your normal user (it asks for your sudo password once):
-
-```bash
-/home/tristanv/Development/qwen-coding-stack/installer/install.sh
-```
-
-**4. After the reboot, run the same command again** to continue with phase 2:
-
-```bash
-/home/tristanv/Development/qwen-coding-stack/installer/install.sh
-```
-
-Things it can't do for you: the IT-policy check, switching the BIOS to Hybrid graphics (it warns if needed), and, with Secure Boot on, the blue **MOK management** screen at the first reboot. Phase 1 asks you to choose a one-time password; at that screen choose **Enroll MOK → Continue → Yes** and enter it.
-
-Every run writes a log to `cache/install-<date>.log`. Re-running later pulls and rebuilds llama.cpp (to update OpenCode, use the `--no-cache` rebuild in **Build the sandbox image**), and never overwrites your tuned `config/server.env` (tuning only reruns with `RETUNE=yes` in `install.conf`).
-
-The numbered steps below are the manual equivalent, and the reference for what the installer does.
+`installer/install.sh` runs every numbered step below; see the [README](../README.md).
 
 ---
 
@@ -823,17 +785,13 @@ git add -A && git commit -qm "checkpoint before AI session" || true
 qwen-stack up
 ```
 
-`qwen-stack up ~/code/app` works from anywhere. Each project keeps its OpenCode sessions, so the next `up` on the same folder picks up where you left off.
-
 ```bash
 qwen-stack shell ~/code/app   # a shell in that project's sandbox, to run tests yourself
 qwen-stack status             # server, GPU memory, open sandboxes, projects with saved sessions
-qwen-stack down               # close all sandboxes and stop the server (frees the GPU)
+qwen-stack down               # close all sandboxes, stop the server, free the GPU; deletes nothing
 qwen-stack boot off           # don't start the server at boot; 'qwen-stack up' starts it when needed
 qwen-stack logs               # follow the server log
 ```
-
-`down` deletes nothing: projects, saved sessions and settings stay as they are. `sandbox` still works on its own while the server is running.
 
 Look at or change server settings (changes update OpenCode and restart the server if it's running):
 
@@ -859,7 +817,7 @@ Sandbox notes:
 
 - Each project's OpenCode sessions, prompt and shell history, and the tools OpenCode downloads are kept in `sandbox-state/<folder>-<id>/` and mounted again next time. The id comes from the folder's full path, so a moved or renamed project starts without them.
 - Running `sandbox` (or `qwen-stack shell`) on a project that's already open joins the same container; it closes when the first window closes.
-- Older versions kept every project's sessions together in `sandbox/opencode-data/`. To continue them in one project, copy them into its folder: `cp -a "$QCS/sandbox/opencode-data/." "$QCS"/sandbox-state/<folder>-<id>/data/` (run `qwen-stack up` on the project once first).
+- Sessions from before per-project storage stay in `sandbox/opencode-data/`; copy them into a project's `sandbox-state/<folder>-<id>/data/` to continue them there.
 - It mounts only the project folder, runs as a non-root user with all capabilities dropped, and refuses to mount your whole home directory or the stack itself.
 - Default limits are `--memory 16g --cpus 8`. Override per run: `SANDBOX_MEMORY=8g SANDBOX_CPUS=6 sandbox`.
 - The container has internet access (for `pip`/`npm`). For stricter isolation, create a dedicated Docker network and firewall its egress except to the server's address and port.
