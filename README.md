@@ -34,7 +34,7 @@ qwen-stack up
 ## Update
 
 ```bash
-cd ~/Development/qwen_coding_stack && git pull
+cd ~/Development/qwen_coding_stack && git pull origin main
 qwen36/qwen-coding-stack-installer/installer/install.sh
 ```
 
