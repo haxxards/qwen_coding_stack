@@ -10,6 +10,7 @@
 # what's already done. Phase 1 (system packages, driver, Docker) usually needs
 # one reboot; run ./install.sh again afterwards and it continues with phase 2.
 set -euo pipefail
+export DOCKER_HOST=unix:///var/run/docker.sock   # build on the system Docker, whatever the shell's Docker context
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 . "$HERE/lib/common.sh"
 . "$HERE/lib/phase1-system.sh"

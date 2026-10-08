@@ -10,6 +10,7 @@
 # afterwards and it continues with phase 2. If the Qwen3.6 stack is already
 # installed, phase 1 has nothing to do and no reboot is needed.
 set -euo pipefail
+export DOCKER_HOST=unix:///var/run/docker.sock   # build on the system Docker, whatever the shell's Docker context
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 . "$HERE/lib/common.sh"
 . "$HERE/lib/phase1-system.sh"

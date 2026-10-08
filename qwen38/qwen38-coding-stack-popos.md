@@ -410,6 +410,7 @@ cat > "$Q38/bin/qwen38-sandbox" <<'SCRIPT'
 # Each project keeps its OpenCode sessions, prompt and shell history, and the tools
 # OpenCode downloads in sandbox-state/<project>/, so the next session picks them up.
 set -euo pipefail
+export DOCKER_HOST=unix:///var/run/docker.sock   # the system Docker: rootless Docker and Docker Desktop remap user IDs, so the sandbox couldn't write your files
 Q38="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 PROJECT="$(realpath "${1:-$PWD}")"
 case "$PROJECT" in "$Q38"|"$Q38"/*) echo "Refusing to mount the stack's own directory." >&2; exit 1 ;; esac
@@ -454,6 +455,7 @@ cat > "$Q38/bin/qwen38-stack" <<'SCRIPT'
 #   qwen38-stack build [--no-cache]  build the sandbox image (--no-cache also updates OpenCode)
 #   qwen38-stack boot on|off         start the server at boot, or not
 set -euo pipefail
+export DOCKER_HOST=unix:///var/run/docker.sock   # the system Docker: rootless Docker and Docker Desktop remap user IDs, so the sandbox couldn't write your files
 Q38="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 SVC=qwen38-server; OTHER_SVC=qwen-server
 IMAGE=qwen38-coding-stack-sandbox:latest; LABEL=qwen38-coding-stack.project
