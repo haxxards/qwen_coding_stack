@@ -29,7 +29,15 @@ git add -A && git commit -qm "checkpoint before AI session" || true
 qwen-stack up
 ```
 
-`up` starts the server if needed and opens OpenCode with the project's earlier sessions. `qwen-stack down` stops everything and deletes nothing; `qwen-stack` alone lists the rest (`shell`, `status`, `logs`, `build`, `boot`).
+`up` starts the server if needed and opens OpenCode with the project's earlier sessions. After quitting OpenCode, review the changes, then keep or discard them:
+
+```bash
+git status --short && git diff
+git add -A && git commit -qm "AI session"   # keep
+git reset --hard && git clean -fd           # or discard
+```
+
+`qwen-stack down` stops everything and deletes nothing; `qwen-stack` alone lists the rest (`shell`, `status`, `logs`, `build`, `boot`).
 
 ## Update
 

@@ -726,14 +726,7 @@ To update OpenCode later, add `--no-cache` to the `docker build` line.
 
 ## 12. Daily use
 
-`qwen38-stack up` starts the server if it isn't running (stopping the Qwen3.6 one), waits for the model to load, then opens OpenCode on the project:
-
-```bash
-cd /path/to/your/project
-git rev-parse --git-dir >/dev/null 2>&1 || git init
-git add -A && git commit -qm "checkpoint before AI session" || true
-qwen38-stack up
-```
+Session commands (git checkpoint first, review or undo after): [README](../README.md#use), with `qwen38-stack`.
 
 Each project keeps its sessions and history in `sandbox-state/<folder>-<id>/` (a moved or renamed project starts fresh); sessions from before that are in `sandbox/opencode-data/`.
 

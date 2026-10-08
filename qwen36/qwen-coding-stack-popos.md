@@ -768,14 +768,7 @@ If the OpenCode install script ever fails, replace that `RUN curl ...` line with
 
 ## 13. Daily use
 
-Start a session on a project (commit first; `git diff` / `git checkout .` is your undo button). `qwen-stack up` starts the server if it isn't running, waits for the model to load, then opens OpenCode:
-
-```bash
-cd /path/to/your/project
-git rev-parse --git-dir >/dev/null 2>&1 || git init
-git add -A && git commit -qm "checkpoint before AI session" || true
-qwen-stack up
-```
+Session commands (git checkpoint first, review or undo after): [README](../README.md#use).
 
 ```bash
 qwen-stack shell ~/code/app   # a shell in that project's sandbox, to run tests yourself
