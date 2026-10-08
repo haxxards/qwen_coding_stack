@@ -8,9 +8,17 @@ die()  { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 # version_lt A B  -> true if A < B (e.g. 13.0 < 13.1)
 version_lt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
 
+# Installs only the packages that are missing, so a re-run skips apt entirely and
+# never upgrades what's already installed (such as the NVIDIA driver).
 apt_install() {
+  local missing=() p
+  for p in "$@"; do
+    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "ok installed" || missing+=("$p")
+  done
+  [ ${#missing[@]} -gt 0 ] || return 0
+  [ -n "${APT_UPDATED:-}" ] || { sudo apt-get update; APT_UPDATED=yes; }
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
+    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "${missing[@]}"
 }
 
 load_config() {

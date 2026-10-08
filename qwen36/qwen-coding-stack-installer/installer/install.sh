@@ -3,6 +3,7 @@
 #
 # Usage (as your normal user, not root; sudo is used where needed):
 #   ./install.sh                 install, or continue after a reboot
+#   ./install.sh --update        also pull and rebuild llama.cpp, and rebuild the sandbox (latest OpenCode)
 #   ./install.sh --cleanup-old   Pop!_OS: delete files left by the earlier manual setup
 #
 # Settings are in install.conf. Safe to re-run at any time: every step checks
@@ -20,9 +21,11 @@ load_config "$HERE"
 start_logging
 keep_sudo_alive
 
+UPDATE=no
 case "${1:-}" in
   "") ;;
   --cleanup-old) cleanup_old; exit 0 ;;
+  --update) UPDATE=yes ;;
   -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
   *) die "Unknown option: $1 (try --help)" ;;
 esac

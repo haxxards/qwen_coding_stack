@@ -56,12 +56,20 @@ SH
 }
 
 build_llama() {
-  log "Building llama.cpp (sm_$CUDA_ARCH) with $CUDA_HOME"
-  if [ -d "$Q38/llama.cpp/.git" ]; then
-    git -C "$Q38/llama.cpp" pull --ff-only
-  else
+  if [ ! -d "$Q38/llama.cpp/.git" ]; then
     git clone https://github.com/ggml-org/llama.cpp "$Q38/llama.cpp"
+  elif [ "$UPDATE" = yes ]; then
+    log "Updating llama.cpp"
+    git -C "$Q38/llama.cpp" pull --ff-only
   fi
+  # Skip the build when the binaries came from this commit, toolkit and GPU architecture.
+  local stamp="$Q38/llama.cpp/build/.qcs-built" want
+  want="$(git -C "$Q38/llama.cpp" rev-parse HEAD) $CUDA_HOME sm_$CUDA_ARCH"
+  if [ "$(cat "$stamp" 2>/dev/null)" = "$want" ] && ls "$Q38"/llama.cpp/build/bin/llama-{server,cli,bench} >/dev/null 2>&1; then
+    info "llama.cpp $(git -C "$Q38/llama.cpp" rev-parse --short HEAD) is already built (install.sh --update pulls and rebuilds it)"
+    return
+  fi
+  log "Building llama.cpp (sm_$CUDA_ARCH) with $CUDA_HOME"
   local cache="$Q38/llama.cpp/build/CMakeCache.txt"
   if [ -f "$cache" ] && ! grep -q "CMAKE_CUDA_COMPILER:.*=$CUDA_HOME/bin/nvcc" "$cache"; then
     info "CUDA toolkit changed since the last build; starting a clean build."
@@ -73,9 +81,14 @@ build_llama() {
     -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc"
   cmake --build "$Q38/llama.cpp/build" --config Release -j"$(nproc)" \
     --target llama-server llama-cli llama-bench
+  echo "$want" > "$stamp"
+  CHANGED=yes; LLAMA_BUILT=yes
 }
 
 download_model() {
+  local stamp="$MODEL_DIR/.qcs-downloaded-$QUANT"
+  MODEL_FILE=$(ls "$MODEL_DIR"/*"${QUANT}"*.gguf 2>/dev/null | sort | head -1 || true)
+  if [ -f "$stamp" ] && [ -n "$MODEL_FILE" ]; then info "Model already downloaded: $MODEL_FILE"; return; fi
   log "Model: Qwen3.8-27B $QUANT (resumes if interrupted)"
   if [ ! -x "$Q38/venv/bin/hf" ]; then
     python3 -m venv "$Q38/venv"
@@ -90,6 +103,7 @@ download_model() {
   MODEL_FILE=$(ls "$MODEL_DIR"/*"${QUANT}"*.gguf 2>/dev/null | sort | head -1 || true)
   [ -n "$MODEL_FILE" ] || die "No $QUANT .gguf found in $MODEL_DIR after download."
   info "Model file: $MODEL_FILE"
+  touch "$stamp"; CHANGED=yes
 }
 
 write_server_env() {
@@ -99,6 +113,7 @@ write_server_env() {
     return
   fi
   log "Creating server.env"
+  CHANGED=yes
   local bridge
   bridge=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)
   cat > "$env" <<ENV
@@ -121,7 +136,6 @@ ENV
 }
 
 build_sandbox_image() {
-  log "Building sandbox image"
   cat > "$Q38/sandbox/Dockerfile" <<'DOCKER'
 FROM debian:bookworm-slim
 ARG UID=1000
@@ -138,17 +152,27 @@ RUN mkdir -p /home/dev/.config/opencode /home/dev/.local/share/opencode
 WORKDIR /workspace
 CMD ["opencode"]
 DOCKER
-  docker build -t qwen38-coding-stack-sandbox:latest \
+  local hash opts=()
+  hash=$({ cat "$Q38/sandbox/Dockerfile"; id -u; id -g; } | sha256sum | cut -c1-16)
+  if [ "$UPDATE" = yes ]; then
+    opts=(--pull --no-cache)
+  elif [ "$(docker image inspect -f '{{index .Config.Labels "qcs.dockerfile"}}' qwen38-coding-stack-sandbox:latest 2>/dev/null)" = "$hash" ]; then
+    info "Sandbox image is up to date (install.sh --update rebuilds it with the latest OpenCode)"
+    return
+  fi
+  log "Building sandbox image"
+  docker build "${opts[@]}" --label "qcs.dockerfile=$hash" -t qwen38-coding-stack-sandbox:latest \
     --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" "$Q38/sandbox"
 }
 
 install_service() {
   log "Installing system service qwen38-server"
-  if [ "${DISABLE_QWEN36_AT_BOOT:-yes}" = yes ] && systemctl is-enabled --quiet qwen-server 2>/dev/null; then
+  local tmp first=no; tmp=$(mktemp)
+  [ -f /etc/systemd/system/qwen38-server.service ] || first=yes
+  if [ "$first" = yes ] && [ "${DISABLE_QWEN36_AT_BOOT:-yes}" = yes ] && systemctl is-enabled --quiet qwen-server 2>/dev/null; then
     sudo systemctl disable --now qwen-server
     info "Qwen3.6 service disabled at boot (still installed; start it with: sudo systemctl start qwen-server)"
   fi
-  local tmp; tmp=$(mktemp)
   cat > "$tmp" <<UNIT
 [Unit]
 Description=llama-server (qwen38-coding-stack)
@@ -172,9 +196,11 @@ UNIT
   if ! cmp -s "$tmp" /etc/systemd/system/qwen38-server.service; then
     sudo install -m 644 "$tmp" /etc/systemd/system/qwen38-server.service
     sudo systemctl daemon-reload
+    CHANGED=yes
   fi
   rm -f "$tmp"
-  sudo systemctl enable qwen38-server >/dev/null
+  # Enable at boot only on first install, so 'qwen38-stack boot off' sticks.
+  [ "$first" = no ] || sudo systemctl enable qwen38-server >/dev/null
 }
 
 laptop_prep() {
@@ -198,6 +224,7 @@ fit_model() {
     return
   fi
   log "Fitting the model to VRAM (qwen38-find-fit $FIT_MODE $FIT_RANGE)"
+  CHANGED=yes
   # shellcheck disable=SC2086
   if "$Q38/bin/qwen38-find-fit" "$FIT_MODE" $FIT_RANGE; then touch "$marker"; return; fi
   warn "Nothing fit; retrying with CTX=$FALLBACK_CTX and fewer GPU layers."
@@ -211,6 +238,7 @@ fit_model() {
 tune_threads() {
   local marker="$Q38/cache/.threads-tuned"
   if [ -f "$marker" ] && [ "${RETUNE:-no}" != yes ]; then info "Threads already tuned; set RETUNE=yes to redo"; return; fi
+  CHANGED=yes
   (
     set -a; . "$Q38/config/server.env"; set +a
     case "$NGL" in auto|99) info "All layers on GPU or NGL=auto; skipping thread tuning"; exit 0 ;; esac
@@ -239,8 +267,16 @@ PY
 
 start_and_verify() {
   [ "${INSTALL_SERVICE:-yes}" = yes ] || { info "Service not installed; start the server with: qwen38-server"; return; }
-  log "Starting the service and waiting for the model to load"
-  systemctl is-active --quiet qwen38-server || { sudo systemctl reset-failed qwen38-server 2>/dev/null || true; sudo systemctl start qwen38-server; }
+  if systemctl is-active --quiet qwen38-server; then
+    if [ "${LLAMA_BUILT:-no}" = yes ]; then log "Restarting the service on the new llama.cpp build"; sudo systemctl restart qwen38-server; fi
+  elif [ "${CHANGED:-no}" = yes ]; then
+    log "Starting the service and waiting for the model to load"
+    sudo systemctl reset-failed qwen38-server 2>/dev/null || true
+    sudo systemctl start qwen38-server
+  else
+    info "Nothing changed and the server is stopped; start it with: qwen38-stack up"
+    return
+  fi
   set -a; . "$Q38/config/server.env"; set +a
   local i
   for i in $(seq 1 60); do

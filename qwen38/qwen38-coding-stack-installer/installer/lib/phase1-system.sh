@@ -5,7 +5,6 @@ phase1() {
   log "Phase 1: system packages, NVIDIA driver, CUDA toolkit, Docker"
   install_self "$here"
   [ "$PROFILE" = debian-laptop ] && enable_debian_components
-  sudo apt-get update
   apt_install build-essential cmake git curl wget pciutils iproute2 \
     libcurl4-openssl-dev python3 python3-venv ca-certificates
   case "$PROFILE" in
@@ -42,6 +41,7 @@ add_cuda_keyring() {
     wget -qO "$QCS/cache/cuda-keyring.deb" \
       "https://developer.download.nvidia.com/compute/cuda/repos/${repo}/x86_64/cuda-keyring_1.1-1_all.deb"
     sudo dpkg -i "$QCS/cache/cuda-keyring.deb"
+    APT_UPDATED=   # fetch the new repo's package list before the next install
   fi
 }
 
@@ -56,7 +56,6 @@ Package: *
 Pin: origin developer.download.nvidia.com
 Pin-Priority: 100
 PIN
-  sudo apt-get update
   resolve_cuda_ver
   ensure_toolkit
 }
@@ -64,7 +63,6 @@ PIN
 debian_driver_and_cuda() {
   log "NVIDIA open driver and CUDA toolkit (NVIDIA repo)"
   add_cuda_keyring "debian${VERSION_ID}"
-  sudo apt-get update
   apt_install nvidia-open
   resolve_cuda_ver
   ensure_toolkit
@@ -93,7 +91,7 @@ secure_boot_key() {
 docker_setup() {
   log "Docker"
   apt_install docker.io
-  sudo systemctl enable --now docker
+  systemctl is-enabled --quiet docker && systemctl is-active --quiet docker || sudo systemctl enable --now docker
   if ! getent group docker | grep -qw "$USER"; then
     sudo usermod -aG docker "$USER"
     info "Added $USER to the docker group (takes effect after reboot/re-login)."

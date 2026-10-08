@@ -17,7 +17,7 @@ nano qwen36/qwen-coding-stack-installer/installer/install.conf   # optional
 qwen36/qwen-coding-stack-installer/installer/install.sh
 ```
 
-The first run installs the driver, CUDA and Docker, then asks to reboot (on the laptop with Secure Boot: Enroll MOK → Continue → Yes at the blue screen). Run `install.sh` again after the reboot to build llama.cpp, download the model, build the sandbox and start the server. Re-running is always safe.
+The first run installs the driver, CUDA and Docker, then asks to reboot (on the laptop with Secure Boot: Enroll MOK → Continue → Yes at the blue screen). Run `install.sh` again after the reboot to build llama.cpp, download the model, build the sandbox and start the server. Re-running skips finished steps.
 
 ## Use
 
@@ -43,7 +43,7 @@ git reset --hard && git clean -fd           # or discard
 
 ```bash
 cd ~/Development/qwen_coding_stack && git pull origin main
-qwen36/qwen-coding-stack-installer/installer/install.sh
+qwen36/qwen-coding-stack-installer/installer/install.sh --update
 ```
 
 ## Qwen3.8

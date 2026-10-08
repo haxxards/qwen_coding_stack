@@ -79,12 +79,20 @@ migrate_old() {
 }
 
 build_llama() {
-  log "Building llama.cpp (sm_$CUDA_ARCH) with $CUDA_HOME"
-  if [ -d "$QCS/llama.cpp/.git" ]; then
-    git -C "$QCS/llama.cpp" pull --ff-only
-  else
+  if [ ! -d "$QCS/llama.cpp/.git" ]; then
     git clone https://github.com/ggml-org/llama.cpp "$QCS/llama.cpp"
+  elif [ "$UPDATE" = yes ]; then
+    log "Updating llama.cpp"
+    git -C "$QCS/llama.cpp" pull --ff-only
   fi
+  # Skip the build when the binaries came from this commit, toolkit and GPU architecture.
+  local stamp="$QCS/llama.cpp/build/.qcs-built" want
+  want="$(git -C "$QCS/llama.cpp" rev-parse HEAD) $CUDA_HOME sm_$CUDA_ARCH"
+  if [ "$(cat "$stamp" 2>/dev/null)" = "$want" ] && ls "$QCS"/llama.cpp/build/bin/llama-{server,cli,bench} >/dev/null 2>&1; then
+    info "llama.cpp $(git -C "$QCS/llama.cpp" rev-parse --short HEAD) is already built (install.sh --update pulls and rebuilds it)"
+    return
+  fi
+  log "Building llama.cpp (sm_$CUDA_ARCH) with $CUDA_HOME"
   local cache="$QCS/llama.cpp/build/CMakeCache.txt"
   if [ -f "$cache" ] && ! grep -q "CMAKE_CUDA_COMPILER:.*=$CUDA_HOME/bin/nvcc" "$cache"; then
     info "CUDA toolkit changed since the last build; starting a clean build."
@@ -96,9 +104,13 @@ build_llama() {
     -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc"
   cmake --build "$QCS/llama.cpp/build" --config Release -j"$(nproc)" \
     --target llama-server llama-cli llama-bench
+  echo "$want" > "$stamp"
+  CHANGED=yes; LLAMA_BUILT=yes
 }
 
 download_model() {
+  local stamp="$MODEL_DIR/.qcs-downloaded"
+  if [ -f "$stamp" ] && [ -f "$MODEL_FILE" ]; then info "Model already downloaded: $MODEL_FILE"; return; fi
   log "Model: Qwen3.6-35B-A3B UD-Q4_K_XL (~22 GB; resumes if interrupted)"
   if [ ! -x "$QCS/venv/bin/hf" ]; then
     python3 -m venv "$QCS/venv"
@@ -111,6 +123,7 @@ download_model() {
     --local-dir "$MODEL_DIR" --include "*UD-Q4_K_XL*" 2>&3 \
     || die "Model download failed (hf's messages are on screen, not in the log). Re-run to resume."
   [ -f "$MODEL_FILE" ] || die "Expected model file not found: $MODEL_FILE (see: ls $MODEL_DIR)"
+  touch "$stamp"; CHANGED=yes
 }
 
 write_server_env() {
@@ -120,6 +133,7 @@ write_server_env() {
     return
   fi
   log "Creating server.env"
+  CHANGED=yes
   local bridge
   bridge=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)
   cat > "$env" <<ENV
@@ -140,7 +154,6 @@ ENV
 }
 
 build_sandbox_image() {
-  log "Building sandbox image"
   cat > "$QCS/sandbox/Dockerfile" <<'DOCKER'
 FROM debian:bookworm-slim
 ARG UID=1000
@@ -157,13 +170,23 @@ RUN mkdir -p /home/dev/.config/opencode /home/dev/.local/share/opencode
 WORKDIR /workspace
 CMD ["opencode"]
 DOCKER
-  docker build -t qwen-coding-stack-sandbox:latest \
+  local hash opts=()
+  hash=$({ cat "$QCS/sandbox/Dockerfile"; id -u; id -g; } | sha256sum | cut -c1-16)
+  if [ "$UPDATE" = yes ]; then
+    opts=(--pull --no-cache)
+  elif [ "$(docker image inspect -f '{{index .Config.Labels "qcs.dockerfile"}}' qwen-coding-stack-sandbox:latest 2>/dev/null)" = "$hash" ]; then
+    info "Sandbox image is up to date (install.sh --update rebuilds it with the latest OpenCode)"
+    return
+  fi
+  log "Building sandbox image"
+  docker build "${opts[@]}" --label "qcs.dockerfile=$hash" -t qwen-coding-stack-sandbox:latest \
     --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" "$QCS/sandbox"
 }
 
 install_service() {
   log "Installing system service qwen-server"
-  local tmp; tmp=$(mktemp)
+  local tmp first=no; tmp=$(mktemp)
+  [ -f /etc/systemd/system/qwen-server.service ] || first=yes
   cat > "$tmp" <<UNIT
 [Unit]
 Description=llama-server (qwen-coding-stack)
@@ -186,9 +209,11 @@ UNIT
   if ! cmp -s "$tmp" /etc/systemd/system/qwen-server.service; then
     sudo install -m 644 "$tmp" /etc/systemd/system/qwen-server.service
     sudo systemctl daemon-reload
+    CHANGED=yes
   fi
   rm -f "$tmp"
-  sudo systemctl enable qwen-server >/dev/null
+  # Enable at boot only on first install, so 'qwen-stack boot off' sticks.
+  [ "$first" = no ] || sudo systemctl enable qwen-server >/dev/null
 }
 
 laptop_prep() {
@@ -208,6 +233,7 @@ tune_split() {
   if [ "${RUN_TUNING:-yes}" != yes ]; then info "Skipping NCMOE tuning (RUN_TUNING=no)"; return; fi
   if [ -f "$marker" ] && [ "${RETUNE:-no}" != yes ]; then info "NCMOE already tuned ($(grep '^NCMOE=' "$QCS/config/server.env")); set RETUNE=yes to redo"; return; fi
   log "Finding the GPU/RAM split (find-ncmoe $NCMOE_RANGE)"
+  CHANGED=yes
   # shellcheck disable=SC2086
   if "$QCS/bin/find-ncmoe" $NCMOE_RANGE; then
     touch "$marker"; return
@@ -225,6 +251,7 @@ tune_split() {
 tune_threads() {
   local marker="$QCS/cache/.threads-tuned"
   if [ -f "$marker" ] && [ "${RETUNE:-no}" != yes ]; then info "Threads already tuned; set RETUNE=yes to redo"; return; fi
+  CHANGED=yes
   (
     set -a; . "$QCS/config/server.env"; set +a
     [ "$NCMOE" != auto ] || { info "NCMOE=auto; skipping thread tuning"; exit 0; }
@@ -253,8 +280,16 @@ PY
 
 start_and_verify() {
   [ "${INSTALL_SERVICE:-yes}" = yes ] || { info "Service not installed; start the server with: qwen-server"; return; }
-  log "Starting the service and waiting for the model to load"
-  systemctl is-active --quiet qwen-server || { sudo systemctl reset-failed qwen-server 2>/dev/null || true; sudo systemctl start qwen-server; }
+  if systemctl is-active --quiet qwen-server; then
+    if [ "${LLAMA_BUILT:-no}" = yes ]; then log "Restarting the service on the new llama.cpp build"; sudo systemctl restart qwen-server; fi
+  elif [ "${CHANGED:-no}" = yes ]; then
+    log "Starting the service and waiting for the model to load"
+    sudo systemctl reset-failed qwen-server 2>/dev/null || true
+    sudo systemctl start qwen-server
+  else
+    info "Nothing changed and the server is stopped; start it with: qwen-stack up"
+    return
+  fi
   set -a; . "$QCS/config/server.env"; set +a
   local i
   for i in $(seq 1 60); do
