@@ -164,6 +164,320 @@ echo "No value started. Try higher values, lower the context (qwen-set CTX=65536
 exit 1
 SCRIPT
 
+# --- qwen-github: read-only GitHub access for the sandbox (deploy keys, held by an ssh-agent) ---
+cat > "$QCS/bin/qwen-github" <<'SCRIPT'
+#!/usr/bin/env bash
+# Read-only GitHub access for the sandbox, one deploy key per repository:
+#   qwen-stack github                         list repositories and the state of their keys
+#   qwen-stack github add OWNER/REPO          make a key (or use one already in place), show the
+#                                            public key to add on GitHub, then check it
+#   qwen-stack github add OWNER/REPO --paste  paste an existing private key instead of making one
+#   qwen-stack github check [OWNER/REPO]      check again: fetching must work, pushing must be refused
+#   qwen-stack github remove OWNER/REPO       delete a repository's key from this machine
+# Keys live in config/github/OWNER/REPO/deploy_key (+ deploy_key.pub). A key put there by hand
+# is picked up the next time a sandbox opens. A key reaches a sandbox only after GitHub has
+# confirmed it is a deploy key for that one repository and refuses pushes with it, and even
+# then only through an ssh-agent outside the container: the private key never enters it.
+set -euo pipefail
+QCS="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+GH="$QCS/config/github"
+ME="qwen-stack github"
+RECHECK_DAYS=7
+MNT=/opt/github-readonly   # where the sandbox sees the generated files
+umask 077
+
+# GitHub's SSH host keys, checked against the SHA256 fingerprints GitHub publishes at
+# https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+KNOWN_HOSTS='github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk='
+
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+printf '%s\n' "$KNOWN_HOSTS" > "$TMP/known_hosts"
+
+die() { echo "$*" >&2; exit 1; }
+need() {
+  local c
+  for c in "$@"; do command -v "$c" >/dev/null || die "$c isn't installed: sudo apt install openssh-client git"; done
+}
+lower() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
+
+# OWNER/REPO, from OWNER/REPO, git@github.com:OWNER/REPO.git or https://github.com/OWNER/REPO
+repo_name() {
+  local r=$1
+  r=${r#git@github.com:}; r=${r#ssh://git@github.com/}; r=${r#https://github.com/}; r=${r%/}; r=${r%.git}
+  [[ $r =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$ ]] && [ "${r#*/}" != . ] && [ "${r#*/}" != .. ] \
+    || die "Not a GitHub repository: $1 (expected OWNER/REPO)"
+  printf '%s' "$r"
+}
+
+# Private keys must never end up in a git repository (the installer's own repository is public).
+guard() {
+  mkdir -p "$GH"; chmod 700 "$GH"
+  if git -C "$GH" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "$GH is inside a git repository; refusing to keep private keys there."
+  fi
+}
+
+repos() {  # every OWNER/REPO that has a key
+  local k r
+  for k in "$GH"/*/*/deploy_key; do
+    [ -f "$k" ] || continue
+    r=${k#"$GH/"}; printf '%s\n' "${r%/deploy_key}"
+  done
+}
+
+# Tighten permissions (ssh refuses keys others can read), drop Windows line endings from a
+# pasted key, and derive the public key if only the private one was put in place.
+tidy() {
+  local repo=$1 dir="$GH/$1"
+  chmod 700 "$GH/${repo%/*}" "$dir"
+  chmod 600 "$dir/deploy_key"
+  if grep -q $'\r' "$dir/deploy_key"; then sed -i 's/\r$//' "$dir/deploy_key"; fi
+  if [ ! -s "$dir/deploy_key.pub" ]; then
+    ssh-keygen -y -f "$dir/deploy_key" > "$TMP/pub" 2>/dev/null \
+      || { echo "$repo: $dir/deploy_key isn't a usable private key (or its passphrase was wrong); skipped." >&2; return 1; }
+    mv "$TMP/pub" "$dir/deploy_key.pub"
+  fi
+  chmod 600 "$dir/deploy_key.pub"
+}
+
+fingerprint() { ssh-keygen -lf "$GH/$1/deploy_key.pub" | awk '{print $2}'; }
+
+state() {  # ok | stale (checked over RECHECK_DAYS ago) | new (never checked, or the key changed)
+  local f="$GH/$1/checked" fp at
+  [ -f "$f" ] || { echo new; return; }
+  read -r fp at < "$f" || true
+  [ "$fp" = "$(fingerprint "$1")" ] || { echo new; return; }
+  if [ $(( $(date +%s) - ${at:-0} )) -gt $(( RECHECK_DAYS * 86400 )) ]; then echo stale; else echo ok; fi
+}
+
+# Ask GitHub about the key directly (not through any agent). Returns 0 when it is a deploy key
+# for exactly this repository, fetching works and pushing is refused; 1 when it must not be used;
+# 2 when GitHub couldn't be reached; 3 when GitHub doesn't know the key yet.
+check_key() {
+  local repo=$1 key="$GH/$1/deploy_key" out
+  local o=(-F /dev/null -i "$key" -o IdentitiesOnly=yes -o IdentityAgent=none
+           -o UserKnownHostsFile="$TMP/known_hosts" -o GlobalKnownHostsFile=/dev/null
+           -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ConnectTimeout=20)
+  [ -t 0 ] || o+=(-o BatchMode=yes)
+  out=$(ssh "${o[@]}" -T git@github.com </dev/null 2>&1) || true
+  case "$(lower "$out")" in
+    *"hi $(lower "$repo")!"*) ;;
+    *"permission denied"*)
+      echo "  GitHub doesn't accept this key yet: it hasn't been added as a deploy key for $repo."; return 3 ;;
+    *"hi "*/*"!"*)
+      echo "  REFUSED: this is the deploy key of another repository: $(grep -o 'Hi [^!]*' <<<"$out" | head -n1 | cut -c4-)"
+      echo "  Give $repo its own key: $ME remove $repo && $ME add $repo"; return 1 ;;
+    *"hi "*)
+      echo "  REFUSED: this is a personal (account) key, not a deploy key. It would give the sandbox every"
+      echo "  repository of that account, with push access. Replace it with a deploy key:"
+      echo "  $ME remove $repo && $ME add $repo"; return 1 ;;
+    *) echo "  Couldn't check the key with GitHub over SSH: $(tail -n1 <<<"$out")"; return 2 ;;
+  esac
+  if ! GIT_SSH_COMMAND="ssh $(printf '%q ' "${o[@]}")" git ls-remote "git@github.com:$repo.git" >/dev/null 2>"$TMP/err"; then
+    echo "  The key is accepted, but fetching $repo failed: $(tail -n1 "$TMP/err")"; return 1
+  fi
+  # Ask for the push service and send nothing: GitHub refuses it at once for a read-only key;
+  # for a key that can push it lists the branches and waits, and the empty input ends it unchanged.
+  out=$(ssh "${o[@]}" git@github.com "git-receive-pack '$repo.git'" </dev/null 2>&1 | tr -d '\0') || true
+  case "$(lower "$out")" in
+    *"read only"*|*"read-only"*) ;;
+    *)
+      echo "  REFUSED: this key can push to $repo ('Allow write access' is ticked for it on GitHub)."
+      echo "  Untick it at https://github.com/$repo/settings/keys, then: $ME check $repo"; return 1 ;;
+  esac
+  printf '%s %s\n' "$(fingerprint "$repo")" "$(date +%s)" > "$GH/$repo/checked"
+}
+
+check_report() {  # check_report REPO -> same return codes as check_key
+  local rc=0
+  echo "Checking the GitHub key for $1 ..."
+  check_key "$1" || rc=$?
+  if [ $rc -eq 0 ]; then
+    echo "  OK: a read-only deploy key for $1 (fetch works, push is refused)."
+  elif [ $rc -ne 2 ]; then
+    rm -f "$GH/$1/checked"   # no longer usable; a network failure keeps the earlier result
+  fi
+  return $rc
+}
+
+show_instructions() {
+  local repo=$1
+  cat <<EOF
+
+Add this public key to GitHub as a deploy key for $repo:
+  1. Open https://github.com/$repo/settings/keys/new
+  2. Title: anything, e.g. "qwen sandbox on $(uname -n)"
+  3. Key: paste this line:
+
+$(cat "$GH/$repo/deploy_key.pub")
+
+  4. Leave "Allow write access" UNTICKED, then click "Add key".
+EOF
+}
+
+cmd_add() {
+  local repo="" paste=no wait=yes a dir
+  for a in "$@"; do
+    case "$a" in
+      --paste) paste=yes ;;
+      --no-wait) wait=no ;;
+      -*) die "usage: $ME add OWNER/REPO [--paste]" ;;
+      *) repo=$(repo_name "$a") ;;
+    esac
+  done
+  [ -n "$repo" ] || die "usage: $ME add OWNER/REPO [--paste]"
+  need ssh ssh-keygen git; guard
+  dir="$GH/$repo"; mkdir -p "$dir"
+  local fresh=no
+  if [ -f "$dir/deploy_key" ]; then
+    [ "$paste" = no ] || die "$repo already has a key. To replace it: $ME remove $repo, then add it again."
+    echo "Using the key already in $dir"
+  elif [ "$paste" = yes ]; then
+    echo "Paste the private key (every line, BEGIN to END), then press Enter and Ctrl+D:"
+    tr -d '\r' > "$TMP/key"
+    ssh-keygen -y -f "$TMP/key" > "$TMP/key.pub" || die "That isn't a valid private key (or the passphrase was wrong)."
+    mv "$TMP/key" "$dir/deploy_key"; mv "$TMP/key.pub" "$dir/deploy_key.pub"
+    echo "Saved to $dir/deploy_key"
+  else
+    ssh-keygen -q -t ed25519 -N "" -C "read-only deploy key for $repo, qwen sandbox on $(uname -n)" -f "$dir/deploy_key"
+    echo "Made a new key for $repo in $dir"
+    fresh=yes
+  fi
+  tidy "$repo" || exit 1
+  if [ "$(state "$repo")" = ok ]; then echo "$repo: already checked, read-only."; return; fi
+  # A key that existed already may be on GitHub: try it before asking. A key GitHub refuses
+  # for good reason (personal, can push, another repository's) is not offered again.
+  local rc=3
+  if [ $fresh = no ]; then
+    rc=0; check_report "$repo" || rc=$?
+    case $rc in 0) return ;; 1) exit 1 ;; esac
+  fi
+  show_instructions "$repo"
+  if [ $wait = yes ] && [ -t 0 ]; then
+    read -r -p "Press Enter once it's added (or Ctrl+C, and later: $ME check $repo) "
+    check_report "$repo" || exit 1
+  else
+    echo "Then check it with: $ME check $repo   (a sandbox also checks it when it opens)"
+  fi
+}
+
+cmd_check() {
+  local r list fail=0
+  need ssh ssh-keygen git; guard
+  if [ $# -gt 0 ]; then list=$(repo_name "$1"); [ -f "$GH/$list/deploy_key" ] || die "No key for $list. Add one: $ME add $list"
+  else list=$(repos); [ -n "$list" ] || die "No keys yet. Add one: $ME add OWNER/REPO"
+  fi
+  for r in $list; do
+    tidy "$r" && check_report "$r" || fail=1
+  done
+  return $fail
+}
+
+cmd_list() {
+  local r s list
+  [ -d "$GH" ] && list=$(repos) || list=""
+  if [ -z "$list" ]; then
+    echo "No GitHub keys. Give the sandbox read-only access to a repository with: $ME add OWNER/REPO"
+    return
+  fi
+  for r in $list; do
+    if [ -s "$GH/$r/deploy_key.pub" ]; then
+      case "$(state "$r")" in
+        ok) s="read-only, checked" ;; stale) s="read-only, re-checked when a sandbox opens" ;; *) s="not checked yet: $ME check $r" ;;
+      esac
+      printf '  %-40s %s  %s\n' "$r" "$(fingerprint "$r")" "$s"
+    else
+      printf '  %-40s %s\n' "$r" "no public key yet: $ME check $r"
+    fi
+  done
+}
+
+cmd_remove() {
+  local repo
+  repo=$(repo_name "${1:-}")
+  [ -d "$GH/$repo" ] || die "No key for $repo."
+  rm -rf "${GH:?}/$repo"
+  rmdir "$GH/${repo%/*}" 2>/dev/null || true
+  echo "Deleted the key for $repo from this machine. Also delete it on GitHub: https://github.com/$repo/settings/keys"
+}
+
+# Used by the sandbox command: checks keys, then writes OUT/ with what the container mounts
+# (ssh config, pinned known_hosts, PUBLIC keys, git URL rewrites) plus the private-key list for
+# the agent and the agent rules. Exit 0 = at least one key is ready, 3 = none.
+cmd_prepare() {
+  local out=${1:?} r rc list ready=()
+  [ -d "$GH" ] || exit 3
+  list=$(repos); [ -n "$list" ] || exit 3
+  for c in ssh ssh-keygen ssh-agent ssh-add git; do
+    command -v "$c" >/dev/null || { echo "GitHub keys skipped: $c isn't installed (sudo apt install openssh-client git)" >&2; exit 3; }
+  done
+  ( guard ) || exit 3
+  for r in $list; do
+    tidy "$r" || continue
+    case "$(state "$r")" in
+      ok) ;;
+      stale)
+        rc=0; check_report "$r" >&2 || rc=$?
+        if [ $rc -eq 2 ]; then
+          echo "  Using the earlier check for $r." >&2
+          printf '%s %s\n' "$(fingerprint "$r")" "$(( $(date +%s) - (RECHECK_DAYS - 1) * 86400 ))" > "$GH/$r/checked"
+        elif [ $rc -ne 0 ]; then echo "  $r is not available in this sandbox." >&2; continue
+        fi ;;
+      new)
+        check_report "$r" >&2 || { echo "  $r is not available in this sandbox." >&2; continue; } ;;
+    esac
+    ready+=("$r")
+  done
+  [ ${#ready[@]} -gt 0 ] || exit 3
+
+  rm -rf "$out"; mkdir -p "$out/mount/keys"
+  cp "$TMP/known_hosts" "$out/mount/known_hosts"
+  : > "$out/agent-keys"
+  {
+    echo "# Generated by $ME for one sandbox. Deploy keys held by an ssh-agent outside the container."
+    for r in "${ready[@]}"; do
+      local a="github-${r/\//-}" pub="${r/\//__}.pub"
+      cp "$GH/$r/deploy_key.pub" "$out/mount/keys/$pub"
+      printf '%s\n' "$GH/$r/deploy_key" >> "$out/agent-keys"
+      printf '\nHost %s\n  HostName github.com\n  User git\n  IdentityFile %s/keys/%s\n  IdentitiesOnly yes\n' "$a" "$MNT" "$pub"
+      printf '  UserKnownHostsFile %s/known_hosts\n  GlobalKnownHostsFile /dev/null\n  StrictHostKeyChecking yes\n  UpdateHostKeys no\n  BatchMode yes\n' "$MNT"
+    done
+  } > "$out/mount/ssh_config"
+  {
+    echo "# Generated by $ME: send these repositories' GitHub URLs through their deploy keys."
+    for r in "${ready[@]}"; do
+      printf '[url "git@github-%s:%s"]\n' "${r/\//-}" "$r"
+      printf '\tinsteadOf = git@github.com:%s\n\tinsteadOf = ssh://git@github.com/%s\n\tinsteadOf = https://github.com/%s\n' "$r" "$r" "$r"
+    done
+  } > "$out/mount/gitconfig"
+  {
+    cat "$QCS/config/opencode/AGENTS.md"
+    printf '\n## GitHub (read-only)\n\nYou can clone, fetch and pull these GitHub repositories, and only these:\n\n'
+    for r in "${ready[@]}"; do printf -- '- `%s`: `git@github.com:%s.git`\n' "$r" "$r"; done
+    cat <<'EOF'
+
+Any github.com URL form for them works: git routes it through the right key. Pushing is
+refused by GitHub, on purpose: these are read-only deploy keys. Do not try to push, do not
+look for other credentials, and do not try to read, copy or move SSH keys or the agent socket.
+To share work, commit locally and tell the user; they review and push it themselves.
+EOF
+  } > "$out/AGENTS.md"
+  chmod -R go-rwx "$out"
+}
+
+case "${1:-list}" in
+  list) cmd_list ;;
+  add) shift; cmd_add "$@" ;;
+  check) shift; cmd_check "$@" ;;
+  remove) shift; cmd_remove "$@" ;;
+  prepare) shift; cmd_prepare "$@" ;;
+  -h|--help|help) sed -n '2,12p' "$0" ;;
+  *) sed -n '2,12p' "$0" >&2; exit 1 ;;
+esac
+SCRIPT
+
 # --- sandbox: runs OpenCode (or any command) in an isolated container ---
 cat > "$QCS/bin/sandbox" <<'SCRIPT'
 #!/usr/bin/env bash
@@ -193,18 +507,39 @@ fi
 [ -f "$QCS/config/opencode/AGENTS.md" ] || "$QCS/bin/write-opencode-config" >/dev/null   # older installs: create the sandbox rules file
 mkdir -p "$STATE"/{data,state,cache}
 printf '%s\n' "$PROJECT" > "$STATE/path"
-exec docker run -it --rm --name "$NAME" --label "qwen-coding-stack.project=$PROJECT" \
+# Read-only GitHub access (qwen-stack github): the deploy keys stay on this machine, in an
+# ssh-agent that lives only as long as this sandbox. The container gets the agent's socket,
+# the public keys, an ssh config with GitHub's pinned host keys, and git URL rewrites.
+AGENTS="$QCS/config/opencode/AGENTS.md"; GITHUB=()
+if [ -x "$QCS/bin/qwen-github" ] && "$QCS/bin/qwen-github" prepare "$STATE/github"; then
+  SOCK="${XDG_RUNTIME_DIR:-/tmp}/qwen-coding-stack-${ID##*-}.agent"
+  [ ! -f "$STATE/github.agent-pid" ] || kill "$(cat "$STATE/github.agent-pid")" 2>/dev/null || true
+  rm -f "$SOCK"
+  eval "$(ssh-agent -s -a "$SOCK")" >/dev/null
+  echo "$SSH_AGENT_PID" > "$STATE/github.agent-pid"
+  trap 'kill "$SSH_AGENT_PID" 2>/dev/null; rm -f "$SOCK" "$STATE/github.agent-pid"' EXIT
+  mapfile -t KEYS < "$STATE/github/agent-keys"
+  SSH_AUTH_SOCK="$SOCK" ssh-add -q "${KEYS[@]}"
+  AGENTS="$STATE/github/AGENTS.md"
+  GITHUB=(-v "$STATE/github/mount":/opt/github-readonly:ro -v "$SOCK":/run/ssh-agent.sock
+          -e SSH_AUTH_SOCK=/run/ssh-agent.sock -e GIT_CONFIG_SYSTEM=/opt/github-readonly/gitconfig
+          -e "GIT_SSH_COMMAND=ssh -F /opt/github-readonly/ssh_config")
+fi
+RUN=(docker run -it --rm --name "$NAME" --label "qwen-coding-stack.project=$PROJECT" \
   --cap-drop ALL --security-opt no-new-privileges --pids-limit 512 \
   --memory "${SANDBOX_MEMORY:-@@SBMEM@@}" --cpus "${SANDBOX_CPUS:-@@SBCPU@@}" \
   -v "$PROJECT":/workspace \
   -v "$QCS/config/opencode/opencode.json":/home/dev/.config/opencode/opencode.json:ro \
-  -v "$QCS/config/opencode/AGENTS.md":/home/dev/.config/opencode/AGENTS.md:ro \
+  -v "$AGENTS":/home/dev/.config/opencode/AGENTS.md:ro \
+  "${GITHUB[@]}" \
   -v "$STATE/data":/home/dev/.local/share/opencode \
   -v "$STATE/state":/home/dev/.local/state \
   -v "$STATE/cache":/home/dev/.cache \
   -e HISTFILE=/home/dev/.local/state/bash_history \
   -w /workspace \
-  qwen-coding-stack-sandbox:latest "${@:2}"
+  qwen-coding-stack-sandbox:latest "${@:2}")
+# With an agent to stop afterwards, stay around until the container exits; otherwise hand over.
+if [ ${#GITHUB[@]} -gt 0 ]; then "${RUN[@]}"; else exec "${RUN[@]}"; fi
 SCRIPT
 
 # --- qwen-stack: bring the server and a project's sandbox up, and take them down ---
@@ -219,6 +554,7 @@ cat > "$QCS/bin/qwen-stack" <<'SCRIPT'
 #   qwen-stack logs                follow the server log
 #   qwen-stack build [--no-cache]  build the sandbox image (--no-cache also updates OpenCode)
 #   qwen-stack boot on|off         start the server at boot, or not
+#   qwen-stack github [add|check|remove] read-only GitHub access for the sandbox (qwen-stack github help)
 set -euo pipefail
 export DOCKER_HOST=unix:///var/run/docker.sock   # the system Docker: rootless Docker and Docker Desktop remap user IDs, so the sandbox couldn't write your files
 QCS="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
@@ -322,6 +658,8 @@ status() {
   fi
   echo "Open sandboxes:"
   docker ps --filter "label=$LABEL" --format "{{.Label \"$LABEL\"}}  ({{.Status}})" 2>/dev/null | sed 's/^/  /' | grep . || echo "  none"
+  echo "GitHub (read-only):"
+  "$QCS/bin/qwen-github" list 2>/dev/null | sed 's/^  //; s/^/  /' || true
   echo "Projects with saved sessions:"
   for f in "$QCS"/sandbox-state/*/path; do
     [ -f "$f" ] || { echo "  none"; break; }
@@ -363,8 +701,9 @@ case "${1:-}" in
     case "${2:-}" in ""|--no-cache) ;; *) die "usage: qwen-stack build [--no-cache]" ;; esac
     build_image ${2:+"$2"} ;;
   boot) boot "${2:-}" ;;
-  ""|-h|--help|help) sed -n '2,10p' "$0" ;;
-  *) sed -n '2,10p' "$0" >&2; exit 1 ;;
+  github) shift; exec "$QCS/bin/qwen-github" "$@" ;;
+  ""|-h|--help|help) sed -n '2,11p' "$0" ;;
+  *) sed -n '2,11p' "$0" >&2; exit 1 ;;
 esac
 SCRIPT
 

@@ -41,6 +41,17 @@ git reset --hard && git clean -fd           # or discard
 
 The sandbox has no root, so the agent can't `apt-get install`. The image already includes what Godot (headless and `xvfb-run`), headless Blender (`bpy`) and Python audio need; add other system packages with `SANDBOX_EXTRA_PACKAGES` in `install.conf` and re-run `install.sh`.
 
+## Read-only GitHub access
+
+Give the sandbox a deploy key for one repository so the agent can pull it but not push:
+
+```bash
+qwen-stack github add OWNER/REPO            # makes a key, shows what to add on GitHub, checks it
+qwen-stack github add OWNER/REPO --paste    # or paste an existing private key
+```
+
+Or list repositories in `GITHUB_READONLY_REPOS` in `install.conf`, or drop a key at `qwen-coding-stack/config/github/OWNER/REPO/deploy_key`. A key that can push, or a personal account key, is refused, and the private key stays outside the container (an `ssh-agent` holds it). Never paste a private key into `install.conf`: it's part of this public repository. Details: the guides' "Read-only GitHub access" section.
+
 ## Update
 
 ```bash

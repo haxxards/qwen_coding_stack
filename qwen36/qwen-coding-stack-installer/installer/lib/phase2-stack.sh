@@ -10,6 +10,7 @@ phase2() {
   write_server_env
   write_commands
   "$QCS/bin/write-opencode-config"
+  setup_github
   [ "${BUILD_SANDBOX_IMAGE:-yes}" = yes ] && build_sandbox_image
   [ "${INSTALL_SERVICE:-yes}" = yes ] && install_service
   [ "$PROFILE" = debian-laptop ] && laptop_prep
@@ -161,7 +162,7 @@ ARG GID=1000
 # Installed as root at build time: inside the sandbox the agent runs as a non-root user
 # with no sudo, so it can't apt-get install anything itself.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl wget git build-essential python3 python3-venv python3-pip \
+      ca-certificates curl wget git openssh-client build-essential python3 python3-venv python3-pip \
       nodejs npm unzip zip xz-utils file ripgrep less procps \
       `# Godot headless (tests, import): system fonts, desktop dirs, D-Bus, udev` \
       fontconfig fonts-dejavu-core xdg-user-dirs libdbus-1-3 libudev1 \
@@ -327,6 +328,17 @@ start_and_verify() {
   warn "Server didn't answer within 5 minutes. Check: sudo journalctl -u qwen-server -n 80 --no-pager"
 }
 
+# GITHUB_READONLY_REPOS (install.conf): make a deploy key for each repository that has none,
+# show what to add on GitHub, and check the ones already added. Never fatal.
+setup_github() {
+  local r
+  [ -n "${GITHUB_READONLY_REPOS:-}" ] || return 0
+  log "Read-only GitHub access: $GITHUB_READONLY_REPOS"
+  for r in $GITHUB_READONLY_REPOS; do
+    "$QCS/bin/qwen-github" add "$r" --no-wait || warn "GitHub key for $r: see above. Retry with: qwen-stack github add $r"
+  done
+}
+
 summary() {
   log "Done"
   info "Settings:"
@@ -347,6 +359,10 @@ summary() {
   info ""
   info "qwen-stack down stops the server and frees the GPU; qwen-stack alone lists the other commands."
   [ "$PROFILE" = popos-desktop ] && info "Remove the earlier manual setup's files: $QCS/installer/install.sh --cleanup-old"
+  if [ -n "${GITHUB_READONLY_REPOS:-}" ]; then
+    info ""; info "Read-only GitHub keys (qwen-stack github):"
+    "$QCS/bin/qwen-github" list | sed 's/^/  /'
+  fi
   info ""
   info "Full log: $LOG"
 }
