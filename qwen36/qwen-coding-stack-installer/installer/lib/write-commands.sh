@@ -74,6 +74,25 @@ cat > "$QCS/config/opencode/opencode.json" <<EOF
   }
 }
 EOF
+cat > "$QCS/config/opencode/AGENTS.md" <<'EOF'
+# Sandbox rules
+
+You are running in a Docker sandbox as the user `dev`, without root and without `sudo`.
+`apt`, `apt-get`, `dpkg -i` and `sudo` will always fail here. Do not try them, and do
+not try to work around them.
+
+- System libraries are installed when the sandbox image is built. If a program fails
+  because a shared library (`lib*.so*`) or system tool is missing, stop and tell the user
+  which Debian bookworm package provides it, so they can add it to
+  `SANDBOX_EXTRA_PACKAGES` in the installer's `install.conf` and re-run `install.sh`.
+- Install Python packages into a virtual environment inside the project
+  (`python3 -m venv .venv`), never with `pip install --user` or `--break-system-packages`.
+- Install Node packages locally in the project (`npm install`), never with `-g`.
+- Download tools into the project (for example a `.tools/` folder) rather than system paths.
+- There is no display. For programs that need one, use `xvfb-run -a <command>`.
+- Godot prints some `ERROR:` lines in headless mode that are harmless; judge a build by
+  its test results, not by those lines alone.
+EOF
 echo "Wrote $QCS/config/opencode/opencode.json (context $CTX)"
 SCRIPT
 
@@ -171,6 +190,7 @@ if [ "$(docker container inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" =
   [ $# -gt 1 ] || set -- . opencode
   exec docker exec -it -w /workspace "$NAME" "${@:2}"
 fi
+[ -f "$QCS/config/opencode/AGENTS.md" ] || "$QCS/bin/write-opencode-config" >/dev/null   # older installs: create the sandbox rules file
 mkdir -p "$STATE"/{data,state,cache}
 printf '%s\n' "$PROJECT" > "$STATE/path"
 exec docker run -it --rm --name "$NAME" --label "qwen-coding-stack.project=$PROJECT" \
@@ -178,6 +198,7 @@ exec docker run -it --rm --name "$NAME" --label "qwen-coding-stack.project=$PROJ
   --memory "${SANDBOX_MEMORY:-@@SBMEM@@}" --cpus "${SANDBOX_CPUS:-@@SBCPU@@}" \
   -v "$PROJECT":/workspace \
   -v "$QCS/config/opencode/opencode.json":/home/dev/.config/opencode/opencode.json:ro \
+  -v "$QCS/config/opencode/AGENTS.md":/home/dev/.config/opencode/AGENTS.md:ro \
   -v "$STATE/data":/home/dev/.local/share/opencode \
   -v "$STATE/state":/home/dev/.local/state \
   -v "$STATE/cache":/home/dev/.cache \

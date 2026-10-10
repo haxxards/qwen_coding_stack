@@ -140,10 +140,23 @@ build_sandbox_image() {
 FROM debian:bookworm-slim
 ARG UID=1000
 ARG GID=1000
+# Installed as root at build time: inside the sandbox the agent runs as a non-root user
+# with no sudo, so it can't apt-get install anything itself.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git build-essential python3 python3-venv python3-pip \
-      nodejs npm unzip ripgrep less procps \
+      ca-certificates curl wget git build-essential python3 python3-venv python3-pip \
+      nodejs npm unzip zip xz-utils file ripgrep less procps \
+      `# Godot headless (tests, import): system fonts, desktop dirs, D-Bus, udev` \
+      fontconfig fonts-dejavu-core xdg-user-dirs libdbus-1-3 libudev1 \
+      `# Godot with a display (xvfb-run, OpenGL 3 / Vulkan on Mesa's software renderer)` \
+      xvfb xauth libgl1 libegl1 libgles2 libgl1-mesa-dri libglx-mesa0 \
+      libx11-6 libxcursor1 libxext6 libxi6 libxinerama1 libxrandr2 libxrender1 libxkbcommon0 \
+      libwayland-client0 libwayland-cursor0 libwayland-egl1 libvulkan1 mesa-vulkan-drivers libasound2 \
+      `# Blender as a Python module (bpy, Python 3.11) loads these even headless` \
+      libsm6 libice6 libxfixes3 libxxf86vm1 \
+      `# Python audio (soundfile writes Ogg Vorbis)` \
+      libsndfile1 \
  && rm -rf /var/lib/apt/lists/*
+#EXTRA_PACKAGES
 RUN groupadd -g ${GID} dev && useradd -m -u ${UID} -g ${GID} -s /bin/bash dev
 USER dev
 RUN curl -fsSL https://opencode.ai/install | bash
@@ -152,6 +165,14 @@ RUN mkdir -p /home/dev/.config/opencode /home/dev/.local/share/opencode
 WORKDIR /workspace
 CMD ["opencode"]
 DOCKER
+  # SANDBOX_EXTRA_PACKAGES (install.conf): more Debian packages for the image.
+  local extra=${SANDBOX_EXTRA_PACKAGES:-}
+  if [ -n "$extra" ]; then
+    [[ "$extra" =~ ^[a-z0-9][a-z0-9.+\ -]*$ ]] \
+      || die "SANDBOX_EXTRA_PACKAGES may only list Debian package names separated by spaces (got: $extra)"
+    sed -i "s|^#EXTRA_PACKAGES$|RUN apt-get update \&\& apt-get install -y --no-install-recommends $extra \&\& rm -rf /var/lib/apt/lists/*|" "$Q38/sandbox/Dockerfile"
+    info "Extra sandbox packages: $extra"
+  fi
   local hash opts=()
   hash=$({ cat "$Q38/sandbox/Dockerfile"; id -u; id -g; } | sha256sum | cut -c1-16)
   if [ "$UPDATE" = yes ]; then

@@ -39,6 +39,8 @@ git reset --hard && git clean -fd           # or discard
 
 `qwen-stack down` stops everything and deletes nothing; `qwen-stack` alone lists the rest (`shell`, `status`, `logs`, `build`, `boot`).
 
+The sandbox has no root, so the agent can't `apt-get install`. The image already includes what Godot (headless and `xvfb-run`), headless Blender (`bpy`) and Python audio need; add other system packages with `SANDBOX_EXTRA_PACKAGES` in `install.conf` and re-run `install.sh`.
+
 ## Update
 
 ```bash

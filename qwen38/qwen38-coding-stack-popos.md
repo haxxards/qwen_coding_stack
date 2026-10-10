@@ -325,6 +325,25 @@ cat > "$Q38/config/opencode/opencode.json" <<EOF
   }
 }
 EOF
+cat > "$Q38/config/opencode/AGENTS.md" <<'EOF'
+# Sandbox rules
+
+You are running in a Docker sandbox as the user `dev`, without root and without `sudo`.
+`apt`, `apt-get`, `dpkg -i` and `sudo` will always fail here. Do not try them, and do
+not try to work around them.
+
+- System libraries are installed when the sandbox image is built. If a program fails
+  because a shared library (`lib*.so*`) or system tool is missing, stop and tell the user
+  which Debian bookworm package provides it, so they can add it to
+  `SANDBOX_EXTRA_PACKAGES` in the installer's `install.conf` and re-run `install.sh`.
+- Install Python packages into a virtual environment inside the project
+  (`python3 -m venv .venv`), never with `pip install --user` or `--break-system-packages`.
+- Install Node packages locally in the project (`npm install`), never with `-g`.
+- Download tools into the project (for example a `.tools/` folder) rather than system paths.
+- There is no display. For programs that need one, use `xvfb-run -a <command>`.
+- Godot prints some `ERROR:` lines in headless mode that are harmless; judge a build by
+  its test results, not by those lines alone.
+EOF
 echo "Wrote $Q38/config/opencode/opencode.json (context $CTX)"
 SCRIPT
 
@@ -427,6 +446,7 @@ if [ "$(docker container inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" =
   [ $# -gt 1 ] || set -- . opencode
   exec docker exec -it -w /workspace "$NAME" "${@:2}"
 fi
+[ -f "$Q38/config/opencode/AGENTS.md" ] || "$Q38/bin/qwen38-write-opencode-config" >/dev/null   # older installs: create the sandbox rules file
 mkdir -p "$STATE"/{data,state,cache}
 printf '%s\n' "$PROJECT" > "$STATE/path"
 exec docker run -it --rm --name "$NAME" --label "qwen38-coding-stack.project=$PROJECT" \
@@ -434,6 +454,7 @@ exec docker run -it --rm --name "$NAME" --label "qwen38-coding-stack.project=$PR
   --memory "${SANDBOX_MEMORY:-6g}" --cpus "${SANDBOX_CPUS:-4}" \
   -v "$PROJECT":/workspace \
   -v "$Q38/config/opencode/opencode.json":/home/dev/.config/opencode/opencode.json:ro \
+  -v "$Q38/config/opencode/AGENTS.md":/home/dev/.config/opencode/AGENTS.md:ro \
   -v "$STATE/data":/home/dev/.local/share/opencode \
   -v "$STATE/state":/home/dev/.local/state \
   -v "$STATE/cache":/home/dev/.cache \
@@ -702,6 +723,8 @@ sudo journalctl -u qwen38-server -n 60 --no-pager
 
 ## 11. Build the sandbox image
 
+The container runs as a non-root user with no root and no `sudo`, so the agent can't `apt-get install` anything: every system library a project needs is installed here, at build time. The list covers Godot (headless and under `xvfb-run`), headless Blender (`bpy`) and Python audio; to add more, put them on the `RUN apt-get` line (or in `SANDBOX_EXTRA_PACKAGES` in the installer's `install.conf`) and rebuild.
+
 ```bash
 Q38=/home/tristanv/Development/qwen38-coding-stack
 mkdir -p "$Q38/sandbox"
@@ -709,9 +732,21 @@ cat > "$Q38/sandbox/Dockerfile" <<'EOF'
 FROM debian:bookworm-slim
 ARG UID=1000
 ARG GID=1000
+# Installed as root at build time: inside the sandbox the agent runs as a non-root user
+# with no sudo, so it can't apt-get install anything itself.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl git build-essential python3 python3-venv python3-pip \
-      nodejs npm unzip ripgrep less procps \
+      ca-certificates curl wget git build-essential python3 python3-venv python3-pip \
+      nodejs npm unzip zip xz-utils file ripgrep less procps \
+      `# Godot headless (tests, import): system fonts, desktop dirs, D-Bus, udev` \
+      fontconfig fonts-dejavu-core xdg-user-dirs libdbus-1-3 libudev1 \
+      `# Godot with a display (xvfb-run, OpenGL 3 / Vulkan on Mesa's software renderer)` \
+      xvfb xauth libgl1 libegl1 libgles2 libgl1-mesa-dri libglx-mesa0 \
+      libx11-6 libxcursor1 libxext6 libxi6 libxinerama1 libxrandr2 libxrender1 libxkbcommon0 \
+      libwayland-client0 libwayland-cursor0 libwayland-egl1 libvulkan1 mesa-vulkan-drivers libasound2 \
+      `# Blender as a Python module (bpy, Python 3.11) loads these even headless` \
+      libsm6 libice6 libxfixes3 libxxf86vm1 \
+      `# Python audio (soundfile writes Ogg Vorbis)` \
+      libsndfile1 \
  && rm -rf /var/lib/apt/lists/*
 RUN groupadd -g ${GID} dev && useradd -m -u ${UID} -g ${GID} -s /bin/bash dev
 USER dev
@@ -796,6 +831,7 @@ sudo journalctl -u qwen38-server -n 150 --no-pager | grep -iE "error|fail|unable
 | Very long pauses before answers | The model is thinking | `qwen38-set REASONING_EFFORT=low` (or `none`) |
 | Agent forgets the task / tool calls fail | Context too small | Raise `CTX` if `qwen38-find-fit ctx` shows room; keep `qwen38-set` as the only way to change it |
 | `qwen38-sandbox` says `No such image: qwen38-coding-stack-sandbox:latest`, or `Unable to find image ... locally` then `denied` | The sandbox image was never built on this machine: the install stopped before that step, or the build failed | `qwen38-stack build` (`qwen38-stack up` also builds it when it's missing). If it says `sandbox/Dockerfile` is missing, run the **Build the sandbox image** step or re-run `install.sh` |
+| The agent tries `apt-get`/`sudo`, or a build fails with `error while loading shared libraries: lib….so` inside the sandbox | The sandbox runs without root on purpose, so nothing can be installed from inside it | Add the Debian package to `SANDBOX_EXTRA_PACKAGES` in the installer's `install.conf` and re-run `install.sh` (the image rebuilds). To find the package for a library: `apt-file search libfoo.so.1` on the host. Godot, Blender (`bpy`), `xvfb-run` and `soundfile` libraries are already included |
 | Container can't reach the server | Server not running, or wrong stack's service is active | `systemctl status qwen38-server`; `. $Q38/config/server.env; curl http://$HOST:$PORT/v1/models` |
 
 ### GPU out of memory
