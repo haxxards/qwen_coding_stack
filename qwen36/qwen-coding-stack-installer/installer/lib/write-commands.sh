@@ -10,6 +10,7 @@ cat > "$QCS/bin/qwen-server" <<'SCRIPT'
 # Starts llama-server using config/server.env.
 # One-off overrides work, e.g.:  NCMOE=30 CTX=65536 qwen-server
 set -euo pipefail
+[ $# -eq 0 ] || { echo "qwen-server takes no arguments: it runs the model server in this terminal until Ctrl-C. To start the server and open OpenCode: qwen-stack up" >&2; exit 1; }
 QCS="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 set -a; . "$QCS/config/server.env"; set +a
 if [ -z "${CUDA_HOME:-}" ] || [ ! -d "$CUDA_HOME" ]; then
@@ -22,6 +23,9 @@ export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 args=(--model "$MODEL" --alias qwen-local -c "$CTX" -np 1 -fa on --jinja
       --host "$HOST" --port "$PORT")
 if [ "$NCMOE" != "auto" ]; then args+=(-ngl 99 --n-cpu-moe "$NCMOE"); fi
+# The experts kept in RAM are otherwise read through mmap, so the system can drop them and
+# re-read them from disk mid-answer. Load them up front when this llama.cpp supports it.
+if grep -qaF -- --load-mode "$QCS/llama.cpp/build/bin/llama-server"; then args+=(--load-mode none); fi
 if [ -n "${THREADS:-}" ]; then args+=(-t "$THREADS"); fi
 # shellcheck disable=SC2206
 args+=($SAMPLING)

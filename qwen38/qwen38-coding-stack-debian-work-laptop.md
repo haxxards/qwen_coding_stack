@@ -272,6 +272,7 @@ cat > "$Q38/bin/qwen38-server" <<'SCRIPT'
 # Starts llama-server for Qwen3.8-27B using config/server.env.
 # One-off overrides work, e.g.:  NGL=40 CTX=32768 qwen38-server
 set -euo pipefail
+[ $# -eq 0 ] || { echo "qwen38-server takes no arguments: it runs the model server in this terminal until Ctrl-C. To start the server and open OpenCode: qwen38-stack up" >&2; exit 1; }
 Q38="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 set -a; . "$Q38/config/server.env"; set +a
 if [ -z "${CUDA_HOME:-}" ] || [ ! -d "$CUDA_HOME" ]; then
