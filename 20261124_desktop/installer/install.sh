@@ -2,8 +2,9 @@
 # qwen38-coding-stack one-shot installer (Qwen3.8-27B).
 #
 # Usage (as your normal user, not root; sudo is used where needed):
-#   ./install.sh            install, or continue after a reboot
-#   ./install.sh --update   also pull and rebuild llama.cpp, and rebuild the sandbox (latest OpenCode)
+#   ./install.sh             install, or continue after a reboot
+#   ./install.sh --update    also pull and rebuild llama.cpp, and rebuild the sandbox (latest OpenCode)
+#   ./install.sh --commands  only (re)write the commands in bin/ and the OpenCode config
 #
 # Settings are in install.conf. Safe to re-run at any time. Phase 1 (system
 # packages, driver, Docker) may need one reboot; run ./install.sh again
@@ -19,15 +20,16 @@ HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
 load_config "$HERE"
 start_logging
-keep_sudo_alive
 
 UPDATE=no
 case "${1:-}" in
   "") ;;
   --update) UPDATE=yes ;;
-  -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+  --commands) write_commands; "$Q38/bin/qwen38-write-opencode-config"; exit 0 ;;
+  -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
   *) die "Unknown option: $1 (try --help)" ;;
 esac
+keep_sudo_alive
 
 phase1 "$HERE"
 if reboot_needed; then

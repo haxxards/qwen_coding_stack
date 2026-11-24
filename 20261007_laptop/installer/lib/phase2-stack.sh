@@ -1,19 +1,20 @@
-# Phase 2: everything under $Q38 (runs as your user; sudo only for the service).
+# Phase 2: everything under $QCS (runs as your user; sudo only for the service).
 
 phase2() {
-  log "Phase 2: llama.cpp, Qwen3.8-27B ($QUANT), commands, sandbox, service"
+  log "Phase 2: llama.cpp, model, commands, sandbox, service"
   check_gpu_stack
   setup_project_dir
+  [ "$PROFILE" = popos-desktop ] && [ "${MIGRATE_OLD:-no}" = yes ] && migrate_old
   build_llama
   download_model
   write_server_env
   write_commands
-  "$Q38/bin/qwen38-write-opencode-config"
+  "$QCS/bin/write-opencode-config"
   setup_github
   [ "${BUILD_SANDBOX_IMAGE:-yes}" = yes ] && build_sandbox_image
   [ "${INSTALL_SERVICE:-yes}" = yes ] && install_service
   [ "$PROFILE" = debian-laptop ] && laptop_prep
-  fit_model
+  tune_split
   [ "$TUNE_THREADS" = yes ] && tune_threads
   start_and_verify
   summary
@@ -32,7 +33,7 @@ check_gpu_stack() {
 
 # Keep CUDA_HOME in an existing server.env pointing at the toolkit chosen above.
 sync_cuda_home() {
-  local env="$Q38/config/server.env"
+  local env="$QCS/config/server.env"
   [ -f "$env" ] || return 0
   if ! grep -qxF "CUDA_HOME=\${CUDA_HOME:-$CUDA_HOME}" "$env"; then
     if grep -q '^CUDA_HOME=' "$env"; then
@@ -45,72 +46,91 @@ sync_cuda_home() {
 }
 
 setup_project_dir() {
-  log "Project directory: $Q38"
-  mkdir -p "$Q38"/{bin,config/opencode,models,sandbox,sandbox-state,cache,venv}
-  cat > "$Q38/config/shell.sh" <<SH
-# qwen38-coding-stack: sourced from ~/.bashrc. Safe to source repeatedly.
-export Q38="$Q38"
-case ":\$PATH:" in *":\$Q38/bin:"*) ;; *) export PATH="\$Q38/bin:\$PATH" ;; esac
+  log "Project directory: $QCS"
+  mkdir -p "$QCS"/{bin,config/opencode,models,sandbox,sandbox-state,cache,venv}
+  cat > "$QCS/config/shell.sh" <<SH
+# qwen-coding-stack: sourced from ~/.bashrc. Safe to source repeatedly.
+export QCS="$QCS"
+case ":\$PATH:" in *":\$QCS/bin:"*) ;; *) export PATH="\$QCS/bin:\$PATH" ;; esac
 SH
-  local line="[ -f \"$Q38/config/shell.sh\" ] && . \"$Q38/config/shell.sh\""
+  local line="[ -f \"$QCS/config/shell.sh\" ] && . \"$QCS/config/shell.sh\""
   grep -qxF "$line" ~/.bashrc || { echo "$line" >> ~/.bashrc; info "Added one line to ~/.bashrc"; }
 }
 
+migrate_old() {
+  log "Migrating from the earlier manual setup"
+  local old="$HOME/models/Qwen3.6-35B-A3B-GGUF"
+  if [ -d "$old" ] && [ ! -e "$MODEL_DIR" ]; then
+    mv "$old" "$MODEL_DIR"; info "Moved existing model to $MODEL_DIR"
+  fi
+  if [ -f "$HOME/.config/systemd/user/qwen-server.service" ]; then
+    systemctl --user disable --now qwen-server 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/qwen-server.service"
+    systemctl --user daemon-reload 2>/dev/null || true
+    info "Removed old per-user service"
+  fi
+  pkill -f "$HOME/Development/llama.cpp/build/bin/llama-server" 2>/dev/null || true
+  local pat='^export (PATH=\$HOME/bin:\$PATH|PATH=\$HOME/Development/qwen:\$PATH|PATH=/usr/local/cuda-[0-9.]+/bin:\$PATH|LD_LIBRARY_PATH=/usr/local/cuda-[0-9.]+/lib64:)'
+  if grep -qE "$pat" ~/.bashrc; then
+    cp ~/.bashrc "$QCS/cache/bashrc.backup.$(date +%Y%m%d-%H%M%S)"
+    grep -vE "$pat" ~/.bashrc > "$QCS/cache/bashrc.new" && cat "$QCS/cache/bashrc.new" > ~/.bashrc
+    rm -f "$QCS/cache/bashrc.new"
+    info "Removed old PATH/CUDA lines from ~/.bashrc (backup in $QCS/cache/)"
+  fi
+}
+
 build_llama() {
-  if [ ! -d "$Q38/llama.cpp/.git" ]; then
-    git clone https://github.com/ggml-org/llama.cpp "$Q38/llama.cpp"
+  if [ ! -d "$QCS/llama.cpp/.git" ]; then
+    git clone https://github.com/ggml-org/llama.cpp "$QCS/llama.cpp"
   elif [ "$UPDATE" = yes ]; then
     log "Updating llama.cpp"
-    git -C "$Q38/llama.cpp" pull --ff-only
+    git -C "$QCS/llama.cpp" pull --ff-only
   fi
   # Skip the build when the binaries came from this commit, toolkit and GPU architecture.
-  local stamp="$Q38/llama.cpp/build/.qcs-built" want
-  want="$(git -C "$Q38/llama.cpp" rev-parse HEAD) $CUDA_HOME sm_$CUDA_ARCH"
-  if [ "$(cat "$stamp" 2>/dev/null)" = "$want" ] && ls "$Q38"/llama.cpp/build/bin/llama-{server,cli,bench} >/dev/null 2>&1; then
-    info "llama.cpp $(git -C "$Q38/llama.cpp" rev-parse --short HEAD) is already built (install.sh --update pulls and rebuilds it)"
+  local stamp="$QCS/llama.cpp/build/.qcs-built" want
+  want="$(git -C "$QCS/llama.cpp" rev-parse HEAD) $CUDA_HOME sm_$CUDA_ARCH"
+  if [ "$(cat "$stamp" 2>/dev/null)" = "$want" ] && ls "$QCS"/llama.cpp/build/bin/llama-{server,cli,bench} >/dev/null 2>&1; then
+    info "llama.cpp $(git -C "$QCS/llama.cpp" rev-parse --short HEAD) is already built (install.sh --update pulls and rebuilds it)"
     return
   fi
   log "Building llama.cpp (sm_$CUDA_ARCH) with $CUDA_HOME"
-  local cache="$Q38/llama.cpp/build/CMakeCache.txt"
+  local cache="$QCS/llama.cpp/build/CMakeCache.txt"
   if [ -f "$cache" ] && ! grep -q "CMAKE_CUDA_COMPILER:.*=$CUDA_HOME/bin/nvcc" "$cache"; then
     info "CUDA toolkit changed since the last build; starting a clean build."
-    rm -rf "$Q38/llama.cpp/build"
+    rm -rf "$QCS/llama.cpp/build"
   fi
-  cmake -S "$Q38/llama.cpp" -B "$Q38/llama.cpp/build" \
+  cmake -S "$QCS/llama.cpp" -B "$QCS/llama.cpp/build" \
     -DBUILD_SHARED_LIBS=OFF -DGGML_CUDA=ON \
     -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" \
     -DCMAKE_CUDA_COMPILER="$CUDA_HOME/bin/nvcc"
-  cmake --build "$Q38/llama.cpp/build" --config Release -j"$(nproc)" \
+  cmake --build "$QCS/llama.cpp/build" --config Release -j"$(nproc)" \
     --target llama-server llama-cli llama-bench
   echo "$want" > "$stamp"
   CHANGED=yes; LLAMA_BUILT=yes
 }
 
 download_model() {
-  local stamp="$MODEL_DIR/.qcs-downloaded-$QUANT"
-  MODEL_FILE=$(ls "$MODEL_DIR"/*"${QUANT}"*.gguf 2>/dev/null | sort | head -1 || true)
-  if [ -f "$stamp" ] && [ -n "$MODEL_FILE" ]; then info "Model already downloaded: $MODEL_FILE"; return; fi
-  log "Model: Qwen3.8-27B $QUANT (resumes if interrupted)"
-  if [ ! -x "$Q38/venv/bin/hf" ]; then
-    python3 -m venv "$Q38/venv"
-    PIP_CACHE_DIR="$Q38/cache/pip" "$Q38/venv/bin/pip" install -q -U huggingface_hub
+  local stamp="$MODEL_DIR/.qcs-downloaded"
+  if [ -f "$stamp" ] && [ -f "$MODEL_FILE" ]; then info "Model already downloaded: $MODEL_FILE"; return; fi
+  log "Model: Qwen3.6-35B-A3B UD-Q4_K_XL (~22 GB; resumes if interrupted)"
+  if [ ! -x "$QCS/venv/bin/hf" ]; then
+    python3 -m venv "$QCS/venv"
+    PIP_CACHE_DIR="$QCS/cache/pip" "$QCS/venv/bin/pip" install -q -U huggingface_hub
   fi
   # hf hides its progress bars unless stderr is a terminal, and start_logging sends
   # all output through tee, so give hf the terminal (fd 3). Without this the
   # download shows only "Fetching N files: 0%" until it finishes.
-  HF_HOME="$Q38/cache/huggingface" "$Q38/venv/bin/hf" download unsloth/Qwen3.8-27B-GGUF \
-    --local-dir "$MODEL_DIR" --include "*${QUANT}*" 2>&3 \
+  HF_HOME="$QCS/cache/huggingface" "$QCS/venv/bin/hf" download unsloth/Qwen3.6-35B-A3B-GGUF \
+    --local-dir "$MODEL_DIR" --include "*UD-Q4_K_XL*" 2>&3 \
     || die "Model download failed (hf's messages are on screen, not in the log). Re-run to resume."
-  MODEL_FILE=$(ls "$MODEL_DIR"/*"${QUANT}"*.gguf 2>/dev/null | sort | head -1 || true)
-  [ -n "$MODEL_FILE" ] || die "No $QUANT .gguf found in $MODEL_DIR after download."
-  info "Model file: $MODEL_FILE"
+  [ -f "$MODEL_FILE" ] || die "Expected model file not found: $MODEL_FILE (see: ls $MODEL_DIR)"
   touch "$stamp"; CHANGED=yes
 }
 
 write_server_env() {
-  local env="$Q38/config/server.env"
+  local env="$QCS/config/server.env"
   if [ -f "$env" ]; then
-    info "server.env exists; keeping your settings (change with: qwen38-set KEY=VALUE)"
+    info "server.env exists; keeping your settings (change with: qwen-set KEY=VALUE)"
     return
   fi
   log "Creating server.env"
@@ -118,26 +138,24 @@ write_server_env() {
   local bridge
   bridge=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)
   cat > "$env" <<ENV
-# qwen38-coding-stack server settings. Change with: qwen38-set KEY=VALUE
+# qwen-coding-stack server settings. Change with: qwen-set KEY=VALUE
 # Each line keeps a value already set in the environment, so one-off
-# overrides work, e.g.:  CTX=32768 qwen38-server
+# overrides work, e.g.:  NCMOE=30 qwen-server
 CUDA_HOME=\${CUDA_HOME:-$CUDA_HOME}
 MODEL=\${MODEL:-$MODEL_FILE}
-NGL=\${NGL:-$NGL}
+NCMOE=\${NCMOE:-$NCMOE}
 CTX=\${CTX:-$CTX}
-CACHE_TYPE=\${CACHE_TYPE:-q8_0}
 THREADS=\${THREADS:-$THREADS}
 HOST=\${HOST:-${bridge:-172.17.0.1}}
-PORT=\${PORT:-8081}
-REASONING_EFFORT=\${REASONING_EFFORT:-$REASONING_EFFORT}
-SAMPLING=\${SAMPLING:---temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0}
+PORT=\${PORT:-8080}
+SAMPLING=\${SAMPLING:---temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0}
 EXTRA_ARGS=\${EXTRA_ARGS:-}
-AGENT_TEMP=\${AGENT_TEMP:-1.0}
+AGENT_TEMP=\${AGENT_TEMP:-0.6}
 ENV
 }
 
 build_sandbox_image() {
-  cat > "$Q38/sandbox/Dockerfile" <<'DOCKER'
+  cat > "$QCS/sandbox/Dockerfile" <<'DOCKER'
 FROM debian:bookworm-slim
 ARG UID=1000
 ARG GID=1000
@@ -171,14 +189,14 @@ DOCKER
   if [ -n "$extra" ]; then
     [[ "$extra" =~ ^[a-z0-9][a-z0-9.+\ -]*$ ]] \
       || die "SANDBOX_EXTRA_PACKAGES may only list Debian package names separated by spaces (got: $extra)"
-    sed -i "s|^#EXTRA_PACKAGES$|RUN apt-get update \&\& apt-get install -y --no-install-recommends $extra \&\& rm -rf /var/lib/apt/lists/*|" "$Q38/sandbox/Dockerfile"
+    sed -i "s|^#EXTRA_PACKAGES$|RUN apt-get update \&\& apt-get install -y --no-install-recommends $extra \&\& rm -rf /var/lib/apt/lists/*|" "$QCS/sandbox/Dockerfile"
     info "Extra sandbox packages: $extra"
   fi
   local hash opts=()
-  hash=$({ cat "$Q38/sandbox/Dockerfile"; id -u; id -g; } | sha256sum | cut -c1-16)
+  hash=$({ cat "$QCS/sandbox/Dockerfile"; id -u; id -g; } | sha256sum | cut -c1-16)
   if [ "$UPDATE" = yes ]; then
     opts=(--pull --no-cache)
-  elif [ "$(docker image inspect -f '{{index .Config.Labels "qcs.dockerfile"}}' qwen38-coding-stack-sandbox:latest 2>/dev/null)" = "$hash" ]; then
+  elif [ "$(docker image inspect -f '{{index .Config.Labels "qcs.dockerfile"}}' qwen-coding-stack-sandbox:latest 2>/dev/null)" = "$hash" ]; then
     info "Sandbox image is up to date (install.sh --update rebuilds it with the latest OpenCode)"
     return
   fi
@@ -186,32 +204,27 @@ DOCKER
   # --load: a docker-container builder otherwise keeps the image in its build cache only.
   local build=(docker build)
   docker buildx version >/dev/null 2>&1 && build=(docker buildx build --load)
-  "${build[@]}" "${opts[@]}" --label "qcs.dockerfile=$hash" -t qwen38-coding-stack-sandbox:latest \
-    --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" "$Q38/sandbox"
-  docker image inspect qwen38-coding-stack-sandbox:latest >/dev/null 2>&1 || die "The build finished but Docker has no qwen38-coding-stack-sandbox:latest image; see the output above."
+  "${build[@]}" "${opts[@]}" --label "qcs.dockerfile=$hash" -t qwen-coding-stack-sandbox:latest \
+    --build-arg UID="$(id -u)" --build-arg GID="$(id -g)" "$QCS/sandbox"
+  docker image inspect qwen-coding-stack-sandbox:latest >/dev/null 2>&1 || die "The build finished but Docker has no qwen-coding-stack-sandbox:latest image; see the output above."
 }
 
 install_service() {
-  log "Installing system service qwen38-server"
+  log "Installing system service qwen-server"
   local tmp first=no; tmp=$(mktemp)
-  [ -f /etc/systemd/system/qwen38-server.service ] || first=yes
-  if [ "$first" = yes ] && [ "${DISABLE_QWEN36_AT_BOOT:-yes}" = yes ] && systemctl is-enabled --quiet qwen-server 2>/dev/null; then
-    sudo systemctl disable --now qwen-server
-    info "Qwen3.6 service disabled at boot (still installed; start it with: sudo systemctl start qwen-server)"
-  fi
+  [ -f /etc/systemd/system/qwen-server.service ] || first=yes
   cat > "$tmp" <<UNIT
 [Unit]
-Description=llama-server (qwen38-coding-stack)
+Description=llama-server (qwen-coding-stack)
 After=docker.service network-online.target
 Wants=docker.service
-Conflicts=qwen-server.service
 StartLimitIntervalSec=600
 StartLimitBurst=5
 
 [Service]
 User=$USER
 ExecStartPre=/bin/sh -c 'until ip -4 addr show docker0 2>/dev/null | grep -q "inet "; do sleep 2; done'
-ExecStart=/bin/bash $Q38/bin/qwen38-server
+ExecStart=/bin/bash $QCS/bin/qwen-server
 Restart=on-failure
 RestartSec=15
 TimeoutStartSec=180
@@ -219,61 +232,61 @@ TimeoutStartSec=180
 [Install]
 WantedBy=multi-user.target
 UNIT
-  if ! cmp -s "$tmp" /etc/systemd/system/qwen38-server.service; then
-    sudo install -m 644 "$tmp" /etc/systemd/system/qwen38-server.service
+  if ! cmp -s "$tmp" /etc/systemd/system/qwen-server.service; then
+    sudo install -m 644 "$tmp" /etc/systemd/system/qwen-server.service
     sudo systemctl daemon-reload
     CHANGED=yes
   fi
   rm -f "$tmp"
-  # Enable at boot only on first install, so 'qwen38-stack boot off' sticks.
-  [ "$first" = no ] || sudo systemctl enable qwen38-server >/dev/null
+  # Enable at boot only on first install, so 'qwen-stack boot off' sticks.
+  [ "$first" = no ] || sudo systemctl enable qwen-server >/dev/null
 }
 
 laptop_prep() {
   log "Laptop: performance profile and GPU check"
   powerprofilesctl set performance 2>/dev/null || warn "Couldn't set the performance power profile."
-  local ac
-  for ac in /sys/class/power_supply/A{C,DP}*/online; do
-    [ -r "$ac" ] && [ "$(cat "$ac")" = 0 ] && warn "Running on battery: fitting and speed will be pessimistic. Plug in."
-  done
+  if ! on_ac_power 2>/dev/null; then
+    [ -r /sys/class/power_supply/AC/online ] && [ "$(cat /sys/class/power_supply/AC/online)" = 0 ] \
+      && warn "Running on battery: tuning results will be pessimistic. Plug in for best results."
+  fi
   if nvidia-smi | grep -qE 'Xorg|gnome-shell|kwin|Xwayland'; then
     warn "The desktop is using the NVIDIA GPU. Set BIOS graphics to Hybrid/Optimus to free VRAM (see the guide)."
   fi
-  return 0
 }
 
-fit_model() {
-  local marker="$Q38/cache/.fitted"
-  if [ "${RUN_TUNING:-yes}" != yes ]; then info "Skipping fitting (RUN_TUNING=no)"; return; fi
-  if [ -f "$marker" ] && [ "${RETUNE:-no}" != yes ]; then
-    info "Already fitted ($(grep -E '^(NGL|CTX)=' "$Q38/config/server.env" | tr '\n' ' ')); set RETUNE=yes to redo"
-    return
-  fi
-  log "Fitting the model to VRAM (qwen38-find-fit $FIT_MODE $FIT_RANGE)"
+tune_split() {
+  local marker="$QCS/cache/.ncmoe-tuned"
+  if [ "${RUN_TUNING:-yes}" != yes ]; then info "Skipping NCMOE tuning (RUN_TUNING=no)"; return; fi
+  if [ -f "$marker" ] && [ "${RETUNE:-no}" != yes ]; then info "NCMOE already tuned ($(grep '^NCMOE=' "$QCS/config/server.env")); set RETUNE=yes to redo"; return; fi
+  log "Finding the GPU/RAM split (find-ncmoe $NCMOE_RANGE)"
   CHANGED=yes
   # shellcheck disable=SC2086
-  if "$Q38/bin/qwen38-find-fit" "$FIT_MODE" $FIT_RANGE; then touch "$marker"; return; fi
-  warn "Nothing fit; retrying with CTX=$FALLBACK_CTX and fewer GPU layers."
-  "$Q38/bin/qwen38-set" CTX="$FALLBACK_CTX"
+  if "$QCS/bin/find-ncmoe" $NCMOE_RANGE; then
+    touch "$marker"; return
+  fi
+  warn "No value in the range fit; retrying with a smaller context (CTX=$SMALL_CTX)."
+  "$QCS/bin/qwen-set" CTX="$SMALL_CTX"
   # shellcheck disable=SC2086
-  if "$Q38/bin/qwen38-find-fit" ngl $FALLBACK_NGL_RANGE; then touch "$marker"; return; fi
-  warn "Still no fit. Falling back to llama.cpp's automatic fitting (NGL=auto)."
-  "$Q38/bin/qwen38-set" NGL=auto
+  if "$QCS/bin/find-ncmoe" $NCMOE_RANGE; then
+    touch "$marker"; return
+  fi
+  warn "Still no fit. Falling back to llama.cpp's automatic fitting (NCMOE=auto)."
+  "$QCS/bin/qwen-set" NCMOE=auto
 }
 
 tune_threads() {
-  local marker="$Q38/cache/.threads-tuned"
+  local marker="$QCS/cache/.threads-tuned"
   if [ -f "$marker" ] && [ "${RETUNE:-no}" != yes ]; then info "Threads already tuned; set RETUNE=yes to redo"; return; fi
   CHANGED=yes
   (
-    set -a; . "$Q38/config/server.env"; set +a
-    case "$NGL" in auto|99) info "All layers on GPU or NGL=auto; skipping thread tuning"; exit 0 ;; esac
+    set -a; . "$QCS/config/server.env"; set +a
+    [ "$NCMOE" != auto ] || { info "NCMOE=auto; skipping thread tuning"; exit 0; }
     log "Measuring CPU thread counts (8, 16, 24) — a few minutes"
-    sudo systemctl stop qwen38-server 2>/dev/null || true
-    pkill -f "$Q38/llama.cpp/build/bin/llama-server" 2>/dev/null || true; sleep 2
-    local csv="$Q38/cache/threads-bench.csv"
-    LD_LIBRARY_PATH="$CUDA_HOME/lib64" "$Q38/llama.cpp/build/bin/llama-bench" \
-      -m "$MODEL" -ngl "$NGL" -fa 1 -t 8,16,24 -p 0 -n 64 -r 2 -o csv > "$csv"
+    sudo systemctl stop qwen-server 2>/dev/null || true
+    pkill -f "$QCS/llama.cpp/build/bin/llama-server" 2>/dev/null || true; sleep 2
+    local csv="$QCS/cache/threads-bench.csv"
+    LD_LIBRARY_PATH="$CUDA_HOME/lib64" "$QCS/llama.cpp/build/bin/llama-bench" \
+      -m "$MODEL" -ngl 99 -fa 1 -ncmoe "$NCMOE" -t 8,16,24 -p 0 -n 128 -r 2 -o csv > "$csv"
     local best
     best=$(python3 - "$csv" <<'PY'
 import csv, sys
@@ -283,7 +296,7 @@ PY
 )
     if [ -n "$best" ]; then
       info "Fastest: $best threads"
-      "$Q38/bin/qwen38-set" THREADS="$best"
+      "$QCS/bin/qwen-set" THREADS="$best"
       touch "$marker"
     else
       warn "Couldn't read benchmark results ($csv); keeping THREADS as is."
@@ -292,18 +305,18 @@ PY
 }
 
 start_and_verify() {
-  [ "${INSTALL_SERVICE:-yes}" = yes ] || { info "Service not installed; start the server with: qwen38-server"; return; }
-  if systemctl is-active --quiet qwen38-server; then
-    if [ "${LLAMA_BUILT:-no}" = yes ]; then log "Restarting the service on the new llama.cpp build"; sudo systemctl restart qwen38-server; fi
+  [ "${INSTALL_SERVICE:-yes}" = yes ] || { info "Service not installed; start the server with: qwen-server"; return; }
+  if systemctl is-active --quiet qwen-server; then
+    if [ "${LLAMA_BUILT:-no}" = yes ]; then log "Restarting the service on the new llama.cpp build"; sudo systemctl restart qwen-server; fi
   elif [ "${CHANGED:-no}" = yes ]; then
     log "Starting the service and waiting for the model to load"
-    sudo systemctl reset-failed qwen38-server 2>/dev/null || true
-    sudo systemctl start qwen38-server
+    sudo systemctl reset-failed qwen-server 2>/dev/null || true
+    sudo systemctl start qwen-server
   else
-    info "Nothing changed and the server is stopped; start it with: qwen38-stack up"
+    info "Nothing changed and the server is stopped; start it with: qwen-stack up"
     return
   fi
-  set -a; . "$Q38/config/server.env"; set +a
+  set -a; . "$QCS/config/server.env"; set +a
   local i
   for i in $(seq 1 60); do
     if curl -sf "http://$HOST:$PORT/v1/models" >/dev/null; then
@@ -312,7 +325,7 @@ start_and_verify() {
     fi
     sleep 5
   done
-  warn "Server didn't answer within 5 minutes. Check: sudo journalctl -u qwen38-server -n 80 --no-pager"
+  warn "Server didn't answer within 5 minutes. Check: sudo journalctl -u qwen-server -n 80 --no-pager"
 }
 
 # GITHUB_READONLY_REPOS (install.conf): make a deploy key for each repository that has none,
@@ -322,21 +335,21 @@ setup_github() {
   [ -n "${GITHUB_READONLY_REPOS:-}" ] || return 0
   log "Read-only GitHub access: $GITHUB_READONLY_REPOS"
   for r in $GITHUB_READONLY_REPOS; do
-    "$Q38/bin/qwen38-github" add "$r" --no-wait || warn "GitHub key for $r: see above. Retry with: qwen38-stack github add $r"
+    "$QCS/bin/qwen-github" add "$r" --no-wait || warn "GitHub key for $r: see above. Retry with: qwen-stack github add $r"
   done
 }
 
 summary() {
   log "Done"
   info "Settings:"
-  grep -E '^[A-Z_]+=' "$Q38/config/server.env" | sed 's/^/      /'
+  grep -E '^[A-Z_]+=' "$QCS/config/server.env" | sed 's/^/      /'
   info ""
-  info "Open a new terminal (or run: . $Q38/config/shell.sh). For each session:"
+  info "Open a new terminal (or run: . $QCS/config/shell.sh). For each session:"
   info ""
   info "  cd /path/to/your/project"
   info "  git rev-parse --git-dir >/dev/null 2>&1 || git init"
   info "  git add -A && git commit -qm \"checkpoint before AI session\" || true"
-  info "  qwen38-stack up"
+  info "  qwen-stack up"
   info ""
   info "After quitting OpenCode, review the changes, then keep or discard them:"
   info ""
@@ -344,11 +357,11 @@ summary() {
   info "  git add -A && git commit -qm \"AI session\"   # keep"
   info "  git reset --hard && git clean -fd           # or discard"
   info ""
-  info "qwen38-stack down stops the server and frees the GPU; qwen38-stack alone lists the other commands."
-  info "Switch back to Qwen3.6 with: qwen-stack up --server"
+  info "qwen-stack down stops the server and frees the GPU; qwen-stack alone lists the other commands."
+  [ "$PROFILE" = popos-desktop ] && info "Remove the earlier manual setup's files: $QCS/installer/install.sh --cleanup-old"
   if [ -n "${GITHUB_READONLY_REPOS:-}" ]; then
-    info ""; info "Read-only GitHub keys (qwen38-stack github):"
-    "$Q38/bin/qwen38-github" list | sed 's/^/  /'
+    info ""; info "Read-only GitHub keys (qwen-stack github):"
+    "$QCS/bin/qwen-github" list | sed 's/^/  /'
   fi
   info ""
   info "Full log: $LOG"

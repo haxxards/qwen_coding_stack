@@ -1,4 +1,4 @@
-# Shared helpers for the qwen-coding-stack installer.
+# Shared helpers for the qwen38-coding-stack installer.
 
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
@@ -30,34 +30,36 @@ load_config() {
   # shellcheck disable=SC1091
   . /etc/os-release
   OS_ID=$ID
-  if [ "${PROFILE:-auto}" = auto ]; then
-    case "$OS_ID" in
-      pop)    PROFILE=popos-desktop ;;
-      debian) PROFILE=debian-laptop ;;
-      *) die "Unsupported OS '$OS_ID'. Set PROFILE in install.conf." ;;
-    esac
-  fi
+  QCS=$Q38   # phase 1 helpers use QCS for the project directory
+  # Each folder of the repository sets up one machine: refuse to set up the other with it.
+  case "${PROFILE:-}/$OS_ID" in
+    popos-desktop/pop|debian-laptop/debian) ;;
+    *) die "This folder's installer is for the ${PROFILE:-?} machine, but this one runs '$OS_ID'. Use the folder for this machine (see the README at the top of the repository)." ;;
+  esac
   case "$PROFILE" in
     popos-desktop)
-      D_ARCH=120; D_NCMOE=24; D_CTX=131072; D_THREADS=""; D_RANGE="26 28 30 32 34 36 38 40"
-      D_SMALLCTX=65536; D_SBMEM=6g; D_SBCPU=4; D_TUNE_THREADS=no ;;
-    debian-laptop)
-      D_ARCH=89; D_NCMOE=34; D_CTX=65536; D_THREADS=8; D_RANGE="34 36 38 40"
-      D_SMALLCTX=32768; D_SBMEM=16g; D_SBCPU=8; D_TUNE_THREADS=yes ;;
+      D_ARCH=120; D_NGL=99; D_CTX=65536; D_THREADS=""
+      FIT_MODE=ctx; FIT_RANGE="131072 98304 65536 49152 32768"
+      D_SBMEM=6g; D_SBCPU=4; D_TUNE_THREADS=no ;;
+    debian-laptop)   # UD-IQ3_XXS: every layer on the 12 GB GPU, fit the context beside it
+      D_ARCH=89; D_NGL=99; D_CTX=32768; D_THREADS=8
+      FIT_MODE=ctx; FIT_RANGE="40960 32768 28672 24576 20480 16384"
+      D_SBMEM=16g; D_SBCPU=8; D_TUNE_THREADS=no ;;
     *) die "Unknown PROFILE '$PROFILE' (use popos-desktop or debian-laptop)" ;;
   esac
+  FALLBACK_CTX=32768
+  FALLBACK_NGL_RANGE="99 62 60 58 56 54 52 50 48 44 40 36 32 28 24"
   CUDA_ARCH=$D_ARCH
-  NCMOE=${NCMOE:-$D_NCMOE}
+  NGL=${NGL:-$D_NGL}
   CTX=${CTX:-$D_CTX}
   THREADS=${THREADS:-$D_THREADS}
-  NCMOE_RANGE=${NCMOE_RANGE:-$D_RANGE}
-  SMALL_CTX=$D_SMALLCTX
+  REASONING_EFFORT=${REASONING_EFFORT:-medium}
+  QUANT=${QUANT:-UD-Q3_K_XL}
   SANDBOX_MEMORY=${SANDBOX_MEMORY:-$D_SBMEM}
   SANDBOX_CPUS=${SANDBOX_CPUS:-$D_SBCPU}
   [ "${TUNE_THREADS:-auto}" = auto ] && TUNE_THREADS=$D_TUNE_THREADS
   CUDA_VER=${CUDA_VER:-auto}
-  MODEL_DIR="$QCS/models/Qwen3.6-35B-A3B-GGUF"
-  MODEL_FILE="$MODEL_DIR/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+  MODEL_DIR="$Q38/models/Qwen3.8-27B-GGUF"
 }
 
 start_logging() {
@@ -65,7 +67,7 @@ start_logging() {
   LOG="$QCS/cache/install-$(date +%Y%m%d-%H%M%S).log"
   exec 3>&2   # the terminal itself, for download progress bars (see download_model)
   exec > >(tee -a "$LOG") 2>&1
-  log "qwen-coding-stack installer — profile: $PROFILE — log: $LOG"
+  log "qwen38-coding-stack installer — profile: $PROFILE — log: $LOG"
 }
 
 keep_sudo_alive() {

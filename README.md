@@ -1,64 +1,19 @@
 # qwen_coding_stack
 
-Qwen on the local GPU (llama.cpp) with OpenCode in a per-project Docker sandbox. Two independent stacks; one model fits on the GPU at a time.
+Qwen on the local GPU (llama.cpp) with OpenCode in a per-project Docker sandbox. Each folder is one machine's setup as of a date: its README is the full guide, and its `installer/install.sh` does every step.
 
-| Model | Commands | Guides (every step, explained) |
-|---|---|---|
-| Qwen3.6-35B-A3B | `qwen-stack`, `sandbox`, `qwen-set` | [Pop!_OS desktop](qwen36/qwen-coding-stack-popos.md) · [Debian laptop](qwen36/qwen-coding-stack-debian-work-laptop.md) |
-| Qwen3.8-27B | `qwen38-stack`, `qwen38-sandbox`, `qwen38-set` | [Pop!_OS desktop](qwen38/qwen38-coding-stack-popos.md) · [Debian laptop](qwen38/qwen38-coding-stack-debian-work-laptop.md) |
+| Folder | Machine | Model | Use it for |
+|---|---|---|---|
+| [`20261124_desktop`](20261124_desktop/) | Pop!_OS desktop, RTX 5080 16 GB | Qwen3.8-27B UD-Q3_K_XL, all on GPU, 48K–64K context, ~46–56 tokens/s (measured) | **Daily use** |
+| [`20261124_laptop`](20261124_laptop/) | Debian laptop, RTX 4000 Ada 12 GB | Qwen3.8-27B UD-IQ3_XXS, all on GPU, ~32K context, ~30 tokens/s | **Daily use** |
+| [`20261007_desktop`](20261007_desktop/) | Pop!_OS desktop | Qwen3.6-35B-A3B UD-Q4_K_XL, experts partly in RAM, 128K context | Very long sessions |
+| [`20261007_laptop`](20261007_laptop/) | Debian laptop | Qwen3.6-35B-A3B UD-Q4_K_XL, most experts in RAM, 64K context | Long sessions |
 
-## Install
+A machine's two setups install side by side (`qwen38-stack` and `qwen-stack`); one model runs at a time. To install, on the machine:
 
 ```bash
-sudo apt update && sudo apt install -y git
 git clone -b main git@github.com:haxxards/qwen_coding_stack.git ~/Development/qwen_coding_stack
-cd ~/Development/qwen_coding_stack
-nano qwen36/qwen-coding-stack-installer/installer/install.conf   # optional
-qwen36/qwen-coding-stack-installer/installer/install.sh
+~/Development/qwen_coding_stack/20261124_desktop/installer/install.sh   # on the laptop: 20261124_laptop
 ```
 
-The first run installs the driver, CUDA and Docker, then asks to reboot (on the laptop with Secure Boot: Enroll MOK → Continue → Yes at the blue screen). Run `install.sh` again after the reboot to build llama.cpp, download the model, build the sandbox and start the server. Re-running skips finished steps.
-
-## Use
-
-```bash
-. ~/Development/qwen-coding-stack/config/shell.sh   # or open a new terminal
-cd ~/path/to/project
-git rev-parse --git-dir >/dev/null 2>&1 || git init
-git add -A && git commit -qm "checkpoint before AI session" || true
-qwen-stack up
-```
-
-`up` starts the server if needed and opens OpenCode with the project's earlier sessions. After quitting OpenCode, review the changes, then keep or discard them:
-
-```bash
-git status --short && git diff
-git add -A && git commit -qm "AI session"   # keep
-git reset --hard && git clean -fd           # or discard
-```
-
-`qwen-stack down` stops everything and deletes nothing; `qwen-stack` alone lists the rest (`shell`, `status`, `logs`, `build`, `boot`).
-
-The sandbox has no root, so the agent can't `apt-get install`. The image already includes what Godot (headless and `xvfb-run`), headless Blender (`bpy`) and Python audio need; add other system packages with `SANDBOX_EXTRA_PACKAGES` in `install.conf` and re-run `install.sh`.
-
-## Read-only GitHub access
-
-Give the sandbox a deploy key for one repository so the agent can pull it but not push:
-
-```bash
-qwen-stack github add OWNER/REPO            # makes a key, shows what to add on GitHub, checks it
-qwen-stack github add OWNER/REPO --paste    # or paste an existing private key
-```
-
-Or list repositories in `GITHUB_READONLY_REPOS` in `install.conf`, or drop a key at `qwen-coding-stack/config/github/OWNER/REPO/deploy_key`. A key that can push, or a personal account key, is refused, and the private key stays outside the container (an `ssh-agent` holds it). Never paste a private key into `install.conf`: it's part of this public repository. Details: the guides' "Read-only GitHub access" section.
-
-## Update
-
-```bash
-cd ~/Development/qwen_coding_stack && git pull origin main
-qwen36/qwen-coding-stack-installer/installer/install.sh --update
-```
-
-## Qwen3.8
-
-Same steps with `qwen38/qwen38-coding-stack-installer/installer/install.sh` (no reboot once Qwen3.6 is installed) and `qwen38-stack`. `qwen-stack up --server` or `qwen38-stack up --server` switches models.
+Each installer refuses to run on the other machine. `install.conf` is part of this public repository: never put a private key in it.
