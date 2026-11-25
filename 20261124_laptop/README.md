@@ -401,22 +401,11 @@ To update OpenCode later: `qwen38-stack build --no-cache`.
 
 ## 13. Daily use
 
-Start a session on a project (commit first, so you can undo):
-
 ```bash
-cd ~/path/to/project
-git rev-parse --git-dir >/dev/null 2>&1 || git init
-git add -A && git commit -qm "checkpoint before AI session" || true
-qwen38-stack up   # starts the server if needed, then opens OpenCode with the project's earlier sessions
+~/Development/qwen_coding_stack/start.sh --folder 20261124_laptop ~/path/to/project
 ```
 
-After quitting OpenCode, review the changes, then keep or discard them:
-
-```bash
-git status --short && git diff
-git add -A && git commit -qm "AI session"   # keep
-git reset --hard && git clean -fd           # or discard
-```
+It commits the project as a git checkpoint, starts the server if needed, opens OpenCode with the project's earlier sessions, and afterwards prints the commands to keep or discard the work. `qwen38-stack up` alone skips the checkpoint.
 
 Each project keeps its sessions and history in `sandbox-state/<folder>-<id>/` (a moved or renamed project starts fresh); sessions from before that are in `sandbox/opencode-data/`.
 

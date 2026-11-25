@@ -17,6 +17,7 @@ phase2() {
   tune_split
   [ "$TUNE_THREADS" = yes ] && tune_threads
   start_and_verify
+  touch "$QCS/cache/.installed"   # start.sh checks for this
   summary
 }
 

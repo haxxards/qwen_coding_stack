@@ -17,6 +17,7 @@ phase2() {
   fit_model
   [ "$TUNE_THREADS" = yes ] && tune_threads
   start_and_verify
+  touch "$Q38/cache/.installed"   # start.sh checks for this
   summary
 }
 

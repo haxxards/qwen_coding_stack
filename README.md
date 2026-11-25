@@ -9,11 +9,12 @@ Qwen on the local GPU (llama.cpp) with OpenCode in a per-project Docker sandbox.
 | [`20261007_desktop`](20261007_desktop/) | Pop!_OS desktop | Qwen3.6-35B-A3B UD-Q4_K_XL, experts partly in RAM, 128K context | Very long sessions |
 | [`20261007_laptop`](20261007_laptop/) | Debian laptop | Qwen3.6-35B-A3B UD-Q4_K_XL, most experts in RAM, 64K context | Long sessions |
 
-A machine's two setups install side by side (`qwen38-stack` and `qwen-stack`); one model runs at a time. To install, on the machine:
+A machine's two setups install side by side (`qwen38-stack` and `qwen-stack`); one model runs at a time. On either machine:
 
 ```bash
 git clone -b main git@github.com:haxxards/qwen_coding_stack.git ~/Development/qwen_coding_stack
-~/Development/qwen_coding_stack/20261124_desktop/installer/install.sh   # on the laptop: 20261124_laptop
+~/Development/qwen_coding_stack/start.sh ~/Development/myproject   # first run installs; if it asks to reboot, reboot and run it again
+~/Development/qwen_coding_stack/stop.sh                            # stop the server, free the GPU
 ```
 
-Each installer refuses to run on the other machine. `install.conf` is part of this public repository: never put a private key in it.
+`start.sh` uses the machine's newest folder (`--folder 20261007_desktop` picks another), commits a git checkpoint, opens OpenCode, and afterwards prints the keep/discard commands. Each installer refuses to run on the other machine. `install.conf` is part of this public repository: never put a private key in it.
