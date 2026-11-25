@@ -15,12 +15,12 @@
 
 Run the sections in order. Why each choice was made is in **Rationale** at the bottom.
 
-## Project layout
+## Install layout
 
 Everything lives in one directory:
 
 ```
-/home/tristanv/Development/qwen-coding-stack/
+/home/tristanv/Development/qwen-runtime/qwen36/
 ├── bin/                   commands: qwen-server, qwen-set, find-ncmoe, sandbox, qwen-stack, write-opencode-config
 ├── config/
 │   ├── shell.sh           sourced by ~/.bashrc (adds bin/ to your PATH)
@@ -44,7 +44,7 @@ The only things placed outside it are system-level integration that can't live i
 
 ## Quick start
 
-`installer/install.sh` runs every numbered step below. Run it as your normal user (it asks for your sudo password once):
+`installer/install.sh` runs every numbered step below, as your normal user:
 
 ```bash
 git clone -b main git@github.com:haxxards/qwen_coding_stack.git ~/Development/qwen_coding_stack   # once; later: git -C ~/Development/qwen_coding_stack pull origin main
@@ -55,13 +55,13 @@ If it asks to reboot, run the same command again afterwards. It also migrates th
 
 ---
 
-## 1. Create the project directory
+## 1. Create the install directory
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 mkdir -p "$QCS"/{bin,config/opencode,models,sandbox,sandbox-state,cache,venv}
 cat > "$QCS/config/shell.sh" <<EOF
-# qwen-coding-stack: sourced from ~/.bashrc. Safe to source repeatedly.
+# Qwen3.6 stack: sourced from ~/.bashrc. Safe to source repeatedly.
 export QCS="$QCS"
 case ":\$PATH:" in *":\$QCS/bin:"*) ;; *) export PATH="\$QCS/bin:\$PATH" ;; esac
 EOF
@@ -78,7 +78,7 @@ echo "QCS=$QCS"
 Reuses the model you already downloaded (saves a 22 GB download), stops the old per-user service so it doesn't hold the GPU, and removes the PATH/CUDA lines the earlier guide added to `~/.bashrc` (a backup is saved in the project's `cache/` first). The old files themselves are removed later, in **Clean up the old layout**, once the new setup works.
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 OLD="$HOME/models/Qwen3.6-35B-A3B-GGUF"
 NEW="$QCS/models/Qwen3.6-35B-A3B-GGUF"
 if [ -d "$OLD" ] && [ ! -e "$NEW" ]; then mv "$OLD" "$NEW" && echo "Moved model to $NEW"; else echo "Model: nothing to move"; fi
@@ -129,7 +129,7 @@ fi
 **CUDA toolkit: add NVIDIA's Ubuntu 24.04 repo, pinned low** so it can only supply CUDA toolkit packages and never replaces Pop's driver.
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 if ! dpkg -s cuda-keyring >/dev/null 2>&1; then
   wget -qO "$QCS/cache/cuda-keyring.deb" \
     https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
@@ -188,7 +188,7 @@ ip -4 -o addr show docker0 | awk '{print $4}'
 Clones on the first run and pulls updates afterwards; `cmake` only rebuilds what changed. The CUDA toolkit is picked automatically (newest 13.x, skipping 13.2). `-DCMAKE_CUDA_ARCHITECTURES=120` targets the RTX 5080 (Blackwell) only, which keeps the build fast.
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 CUDA_HOME=$(ls -d /usr/local/cuda-13.* 2>/dev/null | grep -v 'cuda-13\.2$' | sort -V | tail -1)
 [ -n "$CUDA_HOME" ] || { echo "No usable CUDA 13.x toolkit found; redo step 4."; false; }
 echo "Using $CUDA_HOME"
@@ -216,7 +216,7 @@ If you later switch CUDA versions and `cmake` complains that the compiler change
 Creates the Hugging Face CLI environment only if it's missing. `hf download` skips files that are already complete and resumes partial ones. The vision projector (`mmproj`) is skipped on purpose: it isn't needed for coding and would use VRAM.
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 if [ ! -x "$QCS/venv/bin/hf" ]; then
   python3 -m venv "$QCS/venv"
   PIP_CACHE_DIR="$QCS/cache/pip" "$QCS/venv/bin/pip" install -U huggingface_hub
@@ -234,14 +234,14 @@ ls -lh "$QCS/models/Qwen3.6-35B-A3B-GGUF"
 `config/server.env` is the single source of truth for the server, used identically when you run `qwen-server` in a terminal and when systemd runs it. This block only creates it if it doesn't exist, so it never undoes your tuning. The CUDA path and Docker bridge address are detected automatically.
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 if [ -f "$QCS/config/server.env" ]; then
   echo "server.env already exists; leaving it alone. Change values with: qwen-set KEY=VALUE"
 else
   CUDA_HOME=$(ls -d /usr/local/cuda-13.* 2>/dev/null | grep -v 'cuda-13\.2$' | sort -V | tail -1)
   BRIDGE=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
   cat > "$QCS/config/server.env" <<EOF
-# qwen-coding-stack server settings. Change with: qwen-set KEY=VALUE
+# Qwen3.6 server settings. Change with: qwen-set KEY=VALUE
 # Each line keeps a value already set in the environment, so one-off
 # overrides work, e.g.:  NCMOE=30 qwen-server
 CUDA_HOME=\${CUDA_HOME:-$CUDA_HOME}
@@ -282,7 +282,7 @@ The commands are in this folder's `installer/lib/write-commands.sh`. This writes
 
 ```bash
 ~/Development/qwen_coding_stack/20261007_desktop/installer/install.sh --commands
-. "/home/tristanv/Development/qwen-coding-stack/config/shell.sh"
+. "/home/tristanv/Development/qwen-runtime/qwen36/config/shell.sh"
 command -v qwen-server qwen-set find-ncmoe sandbox qwen-stack
 ```
 
@@ -306,7 +306,7 @@ qwen-server
 In a second terminal, test it:
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 . "$QCS/config/server.env"
 curl -s "http://$HOST:$PORT/v1/models"
 curl -s "http://$HOST:$PORT/v1/chat/completions" \
@@ -334,7 +334,7 @@ A system service starts at boot without needing you to log in, and its file live
 This block also removes the older per-user service if one exists.
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 if [ -f "$HOME/.config/systemd/user/qwen-server.service" ]; then
   systemctl --user disable --now qwen-server 2>/dev/null || true
   rm -f "$HOME/.config/systemd/user/qwen-server.service"
@@ -344,7 +344,7 @@ fi
 pkill -f "$QCS/llama.cpp/build/bin/llama-server" 2>/dev/null || true
 sudo tee /etc/systemd/system/qwen-server.service >/dev/null <<EOF
 [Unit]
-Description=llama-server (qwen-coding-stack)
+Description=llama-server (Qwen3.6)
 After=docker.service network-online.target
 Wants=docker.service
 StartLimitIntervalSec=600
@@ -372,7 +372,7 @@ systemctl status qwen-server --no-pager
 Check it's answering:
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 . "$QCS/config/server.env"
 curl -s "http://$HOST:$PORT/v1/models"
 ```
@@ -390,7 +390,7 @@ sudo journalctl -u qwen-server -n 60 --no-pager
 The container runs as a non-root user whose UID matches yours, so files it creates in your project are owned by you. That user has no root and no `sudo`, so the agent can't `apt-get install` anything: every system library a project needs is installed here, at build time. The list covers Godot (headless and under `xvfb-run`), headless Blender (`bpy`) and Python audio; to add more, put them on the `RUN apt-get` line (or in `SANDBOX_EXTRA_PACKAGES` in the installer's `install.conf`) and rebuild. Re-running rebuilds only what changed.
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 mkdir -p "$QCS/sandbox"
 cat > "$QCS/sandbox/Dockerfile" <<'EOF'
 FROM debian:bookworm-slim
@@ -432,10 +432,10 @@ If the OpenCode install script ever fails, replace that `RUN curl ...` line with
 ## 13. Daily use
 
 ```bash
-~/Development/qwen_coding_stack/start.sh --folder 20261007_desktop ~/path/to/project
+~/Development/qwen_coding_stack/start.sh --folder 20261007_desktop myproject
 ```
 
-It commits the project as a git checkpoint, starts the server if needed, opens OpenCode with the project's earlier sessions, and afterwards prints the commands to keep or discard the work. `qwen-stack up` alone skips the checkpoint.
+It opens `~/Development/qwen-projects/myproject` (made if new; or give a path), commits a git checkpoint, starts the server if needed, and when OpenCode closes prints how to keep or discard the work. `qwen-stack up` alone skips the checkpoint.
 
 ```bash
 qwen-stack shell ~/code/app   # a shell in that project's sandbox, to run tests yourself
@@ -488,7 +488,7 @@ qwen-stack github add haxxards/godot --paste  # paste the private key, then Ente
 or put the files in place; the next sandbox picks them up and checks them:
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 mkdir -p "$QCS/config/github/haxxards/godot"
 cp /path/to/key "$QCS/config/github/haxxards/godot/deploy_key"   # the .pub file is optional
 ```
@@ -510,7 +510,7 @@ Anything the sandbox can read, a determined agent could still send elsewhere; a 
 Unsloth ships MTP GGUFs. On this MoE model the gain is modest (about 1.15–1.2x), so try it only after everything else works. MTP uses ~1 GB extra memory, so re-run `find-ncmoe` afterwards.
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 HF_HOME="$QCS/cache/huggingface" "$QCS/venv/bin/hf" download unsloth/Qwen3.6-35B-A3B-MTP-GGUF \
   --local-dir "$QCS/models/Qwen3.6-35B-A3B-MTP-GGUF" --include "*UD-Q4_K_XL*"
 MTP=$(ls "$QCS"/models/Qwen3.6-35B-A3B-MTP-GGUF/*.gguf | sort | head -1)
@@ -521,7 +521,7 @@ find-ncmoe 26 28 30 32 34 36 38 40
 To turn it off again:
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 qwen-set MODEL="$QCS/models/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf" EXTRA_ARGS=
 ```
 
@@ -532,7 +532,7 @@ qwen-set MODEL="$QCS/models/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
 For a turn-by-turn chat that edits files and auto-commits, with no autonomous command execution. It installs into the container's temporary storage each run.
 
 ```bash
-QCS=/home/tristanv/Development/qwen-coding-stack
+QCS=/home/tristanv/Development/qwen-runtime/qwen36
 . "$QCS/config/server.env"
 sandbox . bash -c "python3 -m venv /tmp/aider && /tmp/aider/bin/pip install -q aider-chat && \
   OPENAI_API_BASE=http://$HOST:$PORT/v1 OPENAI_API_KEY=none /tmp/aider/bin/aider --model openai/qwen-local"
@@ -651,7 +651,7 @@ To go back to a tuned value, run `find-ncmoe 26 28 30 32 34 36 38 40` again.
 
 **Why a Docker sandbox, and not agent permissions alone.** Agent permissions are a UX control, not a security boundary: there are documented cases of an agent routing around disabled write permissions through a subagent. The container enforces isolation at the OS level: only the project directory is visible, it runs as a non-root user with all capabilities dropped, resources are capped, and the agent's config is read-only. The model server stays on the host for direct GPU access and binds only to the Docker bridge, so it's never exposed to your network.
 
-**Why one project directory with one settings file.** Every earlier service failure came from the terminal and the service seeing different things: a CUDA path only in `~/.bashrc`, a script at a different path than the unit expected, a tuned value that only existed in one place. Now `qwen-server` reads `config/server.env` itself, so the terminal and the service always run with identical settings, and `qwen-set` is the one place to change them (it also regenerates the OpenCode config so context sizes can't drift apart). Keeping everything in one folder also makes the setup easy to back up, move, or delete.
+**Why one install directory with one settings file.** Every earlier service failure came from the terminal and the service seeing different things: a CUDA path only in `~/.bashrc`, a script at a different path than the unit expected, a tuned value that only existed in one place. Now `qwen-server` reads `config/server.env` itself, so the terminal and the service always run with identical settings, and `qwen-set` is the one place to change them (it also regenerates the OpenCode config so context sizes can't drift apart). Keeping everything in one folder also makes the setup easy to back up, move, or delete.
 
 **Why a system service instead of a per-user one.** A per-user unit has to live in `~/.config/systemd/user/` and needs "lingering" enabled to start without a login. A system unit in `/etc/systemd/system/` keeps your home directory clean, starts at boot, and still runs as your user via `User=`.
 

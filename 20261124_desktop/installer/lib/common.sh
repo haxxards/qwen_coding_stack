@@ -1,4 +1,4 @@
-# Shared helpers for the qwen38-coding-stack installer.
+# Shared helpers for the Qwen3.8 installer.
 
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
@@ -30,7 +30,7 @@ load_config() {
   # shellcheck disable=SC1091
   . /etc/os-release
   OS_ID=$ID
-  QCS=$Q38   # phase 1 helpers use QCS for the project directory
+  QCS=$Q38   # phase 1 helpers use QCS for the install directory
   # Each folder of the repository sets up one machine: refuse to set up the other with it.
   case "${PROFILE:-}/$OS_ID" in
     popos-desktop/pop|debian-laptop/debian) ;;
@@ -62,12 +62,39 @@ load_config() {
   MODEL_DIR="$Q38/models/Qwen3.8-27B-GGUF"
 }
 
+# Installs before 2026-11-25 lived in ~/Development/qwen(38)-coding-stack, a name too close to the
+# repository's. Move such an install to its new place and fix what recorded the old path.
+move_old_install() {
+  local old=$1 new=$2 cmd=$3 line tmp
+  if [ ! -d "$old" ] || [ -L "$old" ]; then return 0; fi
+  rmdir "$new" 2>/dev/null || true   # an empty leftover can be replaced
+  [ ! -e "$new" ] || die "Both $old and $new exist. Keep one (move what you need into it), delete the other, then run this again."
+  log "Moving the install from $old to $new"
+  if [ -x "$old/bin/$cmd" ]; then "$old/bin/$cmd" down; fi   # closes its sandboxes and stops its server
+  mkdir -p "$(dirname "$new")"
+  mv "$old" "$new"
+  if [ -f "$new/config/server.env" ]; then
+    sed -i "s|$old/|$new/|g; 1s|^# [a-z0-9]*-coding-stack server settings|# Server settings|" "$new/config/server.env"
+  fi
+  rm -rf "$new/venv"   # a Python venv can't be moved; it's made again when a download needs it
+  # The binaries don't depend on the path: keep them, and let the next rebuild configure afresh.
+  if [ -d "$new/llama.cpp/build" ]; then
+    find "$new/llama.cpp/build" -mindepth 1 -maxdepth 1 ! -name bin ! -name .qcs-built -exec rm -rf {} +
+  fi
+  line="[ -f \"$old/config/shell.sh\" ] && . \"$old/config/shell.sh\""
+  if grep -qxF "$line" ~/.bashrc 2>/dev/null; then
+    tmp=$(mktemp); grep -vxF "$line" ~/.bashrc > "$tmp" || true
+    cat "$tmp" > ~/.bashrc; rm -f "$tmp"
+  fi
+  info "Moved. Open a new terminal afterwards: terminals already open look for the commands in $old."
+}
+
 start_logging() {
   mkdir -p "$QCS/cache"
   LOG="$QCS/cache/install-$(date +%Y%m%d-%H%M%S).log"
   exec 3>&2   # the terminal itself, for download progress bars (see download_model)
   exec > >(tee -a "$LOG") 2>&1
-  log "qwen38-coding-stack installer — profile: $PROFILE — log: $LOG"
+  log "Qwen3.8 installer — profile: $PROFILE — log: $LOG"
 }
 
 keep_sudo_alive() {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qwen38-coding-stack one-shot installer (Qwen3.8-27B).
+# Qwen3.8-27B one-shot installer.
 #
 # Usage (as your normal user, not root; sudo is used where needed):
 #   ./install.sh             install, or continue after a reboot
@@ -18,7 +18,13 @@ HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 . "$HERE/lib/phase2-stack.sh"
 . "$HERE/lib/write-commands.sh"
 
+case "${1:-}" in
+  -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+  ""|--update|--commands) ;;
+  *) die "Unknown option: $1 (try --help)" ;;
+esac
 load_config "$HERE"
+move_old_install "$HOME/Development/qwen38-coding-stack" "$Q38" qwen38-stack
 start_logging
 
 UPDATE=no
@@ -26,8 +32,6 @@ case "${1:-}" in
   "") ;;
   --update) UPDATE=yes ;;
   --commands) write_commands; "$Q38/bin/qwen38-write-opencode-config"; exit 0 ;;
-  -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
-  *) die "Unknown option: $1 (try --help)" ;;
 esac
 keep_sudo_alive
 

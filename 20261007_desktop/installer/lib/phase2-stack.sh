@@ -47,10 +47,10 @@ sync_cuda_home() {
 }
 
 setup_project_dir() {
-  log "Project directory: $QCS"
+  log "Install directory: $QCS"
   mkdir -p "$QCS"/{bin,config/opencode,models,sandbox,sandbox-state,cache,venv}
   cat > "$QCS/config/shell.sh" <<SH
-# qwen-coding-stack: sourced from ~/.bashrc. Safe to source repeatedly.
+# Qwen3.6 stack: sourced from ~/.bashrc. Safe to source repeatedly.
 export QCS="$QCS"
 case ":\$PATH:" in *":\$QCS/bin:"*) ;; *) export PATH="\$QCS/bin:\$PATH" ;; esac
 SH
@@ -139,7 +139,7 @@ write_server_env() {
   local bridge
   bridge=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)
   cat > "$env" <<ENV
-# qwen-coding-stack server settings. Change with: qwen-set KEY=VALUE
+# Qwen3.6 server settings. Change with: qwen-set KEY=VALUE
 # Each line keeps a value already set in the environment, so one-off
 # overrides work, e.g.:  NCMOE=30 qwen-server
 CUDA_HOME=\${CUDA_HOME:-$CUDA_HOME}
@@ -216,7 +216,7 @@ install_service() {
   [ -f /etc/systemd/system/qwen-server.service ] || first=yes
   cat > "$tmp" <<UNIT
 [Unit]
-Description=llama-server (qwen-coding-stack)
+Description=llama-server (Qwen3.6)
 After=docker.service network-online.target
 Wants=docker.service
 StartLimitIntervalSec=600

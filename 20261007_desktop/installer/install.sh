@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# qwen-coding-stack one-shot installer.
+# Qwen3.6 one-shot installer.
 #
 # Usage (as your normal user, not root; sudo is used where needed):
 #   ./install.sh                 install, or continue after a reboot
@@ -19,7 +19,13 @@ HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 . "$HERE/lib/write-commands.sh"
 . "$HERE/lib/cleanup-old.sh"
 
+case "${1:-}" in
+  -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+  ""|--cleanup-old|--update|--commands) ;;
+  *) die "Unknown option: $1 (try --help)" ;;
+esac
 load_config "$HERE"
+move_old_install "$HOME/Development/qwen-coding-stack" "$QCS" qwen-stack
 start_logging
 
 UPDATE=no
@@ -28,8 +34,6 @@ case "${1:-}" in
   --cleanup-old) cleanup_old; exit 0 ;;
   --update) UPDATE=yes ;;
   --commands) write_commands; "$QCS/bin/write-opencode-config"; exit 0 ;;
-  -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
-  *) die "Unknown option: $1 (try --help)" ;;
 esac
 keep_sudo_alive
 

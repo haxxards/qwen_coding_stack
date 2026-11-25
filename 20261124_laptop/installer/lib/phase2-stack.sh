@@ -47,10 +47,10 @@ sync_cuda_home() {
 }
 
 setup_project_dir() {
-  log "Project directory: $Q38"
+  log "Install directory: $Q38"
   mkdir -p "$Q38"/{bin,config/opencode,models,sandbox,sandbox-state,cache,venv}
   cat > "$Q38/config/shell.sh" <<SH
-# qwen38-coding-stack: sourced from ~/.bashrc. Safe to source repeatedly.
+# Qwen3.8 stack: sourced from ~/.bashrc. Safe to source repeatedly.
 export Q38="$Q38"
 case ":\$PATH:" in *":\$Q38/bin:"*) ;; *) export PATH="\$Q38/bin:\$PATH" ;; esac
 SH
@@ -131,7 +131,7 @@ write_server_env() {
   local bridge
   bridge=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)
   cat > "$env" <<ENV
-# qwen38-coding-stack server settings. Change with: qwen38-set KEY=VALUE
+# Qwen3.8 server settings. Change with: qwen38-set KEY=VALUE
 # Each line keeps a value already set in the environment, so one-off
 # overrides work, e.g.:  CTX=32768 qwen38-server
 CUDA_HOME=\${CUDA_HOME:-$CUDA_HOME}
@@ -214,7 +214,7 @@ install_service() {
   fi
   cat > "$tmp" <<UNIT
 [Unit]
-Description=llama-server (qwen38-coding-stack)
+Description=llama-server (Qwen3.8)
 After=docker.service network-online.target
 Wants=docker.service
 Conflicts=qwen-server.service

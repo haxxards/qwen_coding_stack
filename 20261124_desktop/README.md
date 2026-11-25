@@ -19,12 +19,12 @@ The UD-Q3_K_XL speed has been measured on an RTX 5080; the other rows are estima
 
 **Compared with the Qwen3.6 setup ([`20261007_desktop`](../20261007_desktop/)):** expect noticeably better coding and agent reliability (Qwen reports large gains over Qwen3.6-27B, which already beat Qwen3.6-35B-A3B on coding), at similar or slightly lower speed, with about half the context (48K–64K vs 128K). Keep the Qwen3.6 stack for very long sessions; see **Switching between Qwen3.6 and Qwen3.8**.
 
-## Project layout
+## Install layout
 
 Everything lives in one directory, separate from the Qwen3.6 stack so the two never interfere:
 
 ```
-/home/tristanv/Development/qwen38-coding-stack/
+/home/tristanv/Development/qwen-runtime/qwen38/
 ├── bin/                   commands: qwen38-server, qwen38-set, qwen38-find-fit, qwen38-sandbox, qwen38-stack, qwen38-write-opencode-config
 ├── config/
 │   ├── shell.sh           sourced by ~/.bashrc (adds bin/ to your PATH)
@@ -51,7 +51,7 @@ Outside it: apt packages and apt settings, the service file `/etc/systemd/system
 
 ## Quick start
 
-`installer/install.sh` runs every numbered step below. Run it as your normal user (it asks for your sudo password once):
+`installer/install.sh` runs every numbered step below, as your normal user:
 
 ```bash
 git clone -b main git@github.com:haxxards/qwen_coding_stack.git ~/Development/qwen_coding_stack   # once; later: git -C ~/Development/qwen_coding_stack pull origin main
@@ -62,13 +62,13 @@ If it asks to reboot, run the same command again afterwards. If the Qwen3.6 setu
 
 ---
 
-## 1. Create the project directory
+## 1. Create the install directory
 
 ```bash
-Q38=/home/tristanv/Development/qwen38-coding-stack
+Q38=/home/tristanv/Development/qwen-runtime/qwen38
 mkdir -p "$Q38"/{bin,config/opencode,models,sandbox,sandbox-state,cache,venv}
 cat > "$Q38/config/shell.sh" <<EOF
-# qwen38-coding-stack: sourced from ~/.bashrc. Safe to source repeatedly.
+# Qwen3.8 stack: sourced from ~/.bashrc. Safe to source repeatedly.
 export Q38="$Q38"
 case ":\$PATH:" in *":\$Q38/bin:"*) ;; *) export PATH="\$Q38/bin:\$PATH" ;; esac
 EOF
@@ -105,7 +105,7 @@ fi
 ```
 
 ```bash
-Q38=/home/tristanv/Development/qwen38-coding-stack
+Q38=/home/tristanv/Development/qwen-runtime/qwen38
 if ! dpkg -s cuda-keyring >/dev/null 2>&1; then
   wget -qO "$Q38/cache/cuda-keyring.deb" \
     https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
@@ -158,7 +158,7 @@ ip -4 -o addr show docker0 | awk '{print $4}'
 Clones on the first run and pulls updates afterwards. `-DCMAKE_CUDA_ARCHITECTURES=120` targets the RTX 5080 (Blackwell) only.
 
 ```bash
-Q38=/home/tristanv/Development/qwen38-coding-stack
+Q38=/home/tristanv/Development/qwen-runtime/qwen38
 CUDA_HOME=$(ls -d /usr/local/cuda-13.* 2>/dev/null | grep -v 'cuda-13\.2$' | sort -V | tail -1)
 [ -n "$CUDA_HOME" ] || { echo "No usable CUDA 13.x toolkit found; redo the CUDA step."; false; }
 echo "Using $CUDA_HOME"
@@ -186,7 +186,7 @@ If you later switch CUDA versions and `cmake` complains that the compiler change
 Downloads Unsloth's **UD-Q3_K_XL** quant (13.1 GB). See **Can this machine run it?** for why 3-bit rather than 4-bit. `hf download` skips completed files and resumes partial ones. The vision projector (`mmproj`) is skipped: it isn't needed for coding and would use VRAM.
 
 ```bash
-Q38=/home/tristanv/Development/qwen38-coding-stack
+Q38=/home/tristanv/Development/qwen-runtime/qwen38
 if [ ! -x "$Q38/venv/bin/hf" ]; then
   python3 -m venv "$Q38/venv"
   PIP_CACHE_DIR="$Q38/cache/pip" "$Q38/venv/bin/pip" install -U huggingface_hub
@@ -204,7 +204,7 @@ ls -lh "$Q38/models/Qwen3.8-27B-GGUF"
 `config/server.env` is used identically by a terminal run and by the service. This block only creates it if it doesn't exist, so it never undoes your tuning.
 
 ```bash
-Q38=/home/tristanv/Development/qwen38-coding-stack
+Q38=/home/tristanv/Development/qwen-runtime/qwen38
 if [ -f "$Q38/config/server.env" ]; then
   echo "server.env already exists; leaving it alone. Change values with: qwen38-set KEY=VALUE"
 else
@@ -212,7 +212,7 @@ else
   BRIDGE=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
   MODEL=$(ls "$Q38"/models/Qwen3.8-27B-GGUF/*UD-Q3_K_XL*.gguf 2>/dev/null | sort | head -1)
   cat > "$Q38/config/server.env" <<EOF
-# qwen38-coding-stack server settings. Change with: qwen38-set KEY=VALUE
+# Qwen3.8 server settings. Change with: qwen38-set KEY=VALUE
 # Each line keeps a value already set in the environment, so one-off
 # overrides work, e.g.:  CTX=32768 qwen38-server
 CUDA_HOME=\${CUDA_HOME:-$CUDA_HOME}
@@ -254,7 +254,7 @@ The commands are in this folder's `installer/lib/write-commands.sh`. This writes
 
 ```bash
 ~/Development/qwen_coding_stack/20261124_desktop/installer/install.sh --commands
-. "/home/tristanv/Development/qwen38-coding-stack/config/shell.sh"
+. "/home/tristanv/Development/qwen-runtime/qwen38/config/shell.sh"
 command -v qwen38-server qwen38-set qwen38-find-fit qwen38-sandbox qwen38-stack
 ```
 
@@ -273,7 +273,7 @@ qwen38-server
 In a second terminal, test it:
 
 ```bash
-Q38=/home/tristanv/Development/qwen38-coding-stack
+Q38=/home/tristanv/Development/qwen-runtime/qwen38
 . "$Q38/config/server.env"
 curl -s "http://$HOST:$PORT/v1/models"
 curl -s "http://$HOST:$PORT/v1/chat/completions" \
@@ -299,7 +299,7 @@ Close GPU-heavy apps (browser video, games) first; whatever they use isn't avail
 Same design as the Qwen3.6 stack's service, with one addition: `Conflicts=qwen-server.service`. Both models need the whole GPU, so starting one service automatically stops the other. If the Qwen3.6 service is set to start at boot, this block turns that off (it stays installed; see **Switching between Qwen3.6 and Qwen3.8**).
 
 ```bash
-Q38=/home/tristanv/Development/qwen38-coding-stack
+Q38=/home/tristanv/Development/qwen-runtime/qwen38
 pkill -f "$Q38/llama.cpp/build/bin/llama-server" 2>/dev/null || true
 if systemctl is-enabled --quiet qwen-server 2>/dev/null; then
   sudo systemctl disable --now qwen-server
@@ -307,7 +307,7 @@ if systemctl is-enabled --quiet qwen-server 2>/dev/null; then
 fi
 sudo tee /etc/systemd/system/qwen38-server.service >/dev/null <<EOF
 [Unit]
-Description=llama-server (qwen38-coding-stack)
+Description=llama-server (Qwen3.8)
 After=docker.service network-online.target
 Wants=docker.service
 Conflicts=qwen-server.service
@@ -334,7 +334,7 @@ systemctl status qwen38-server --no-pager
 ```
 
 ```bash
-Q38=/home/tristanv/Development/qwen38-coding-stack
+Q38=/home/tristanv/Development/qwen-runtime/qwen38
 . "$Q38/config/server.env"
 curl -s "http://$HOST:$PORT/v1/models"
 sudo journalctl -u qwen38-server -n 60 --no-pager
@@ -347,7 +347,7 @@ sudo journalctl -u qwen38-server -n 60 --no-pager
 The container runs as a non-root user with no root and no `sudo`, so the agent can't `apt-get install` anything: every system library a project needs is installed here, at build time. The list covers Godot (headless and under `xvfb-run`), headless Blender (`bpy`) and Python audio; to add more, put them on the `RUN apt-get` line (or in `SANDBOX_EXTRA_PACKAGES` in the installer's `install.conf`) and rebuild.
 
 ```bash
-Q38=/home/tristanv/Development/qwen38-coding-stack
+Q38=/home/tristanv/Development/qwen-runtime/qwen38
 mkdir -p "$Q38/sandbox"
 cat > "$Q38/sandbox/Dockerfile" <<'EOF'
 FROM debian:bookworm-slim
@@ -387,10 +387,10 @@ To update OpenCode later: `qwen38-stack build --no-cache`.
 ## 12. Daily use
 
 ```bash
-~/Development/qwen_coding_stack/start.sh --folder 20261124_desktop ~/path/to/project
+~/Development/qwen_coding_stack/start.sh --folder 20261124_desktop myproject
 ```
 
-It commits the project as a git checkpoint, starts the server if needed, opens OpenCode with the project's earlier sessions, and afterwards prints the commands to keep or discard the work. `qwen38-stack up` alone skips the checkpoint.
+It opens `~/Development/qwen-projects/myproject` (made if new; or give a path), commits a git checkpoint, starts the server if needed, and when OpenCode closes prints how to keep or discard the work. `qwen38-stack up` alone skips the checkpoint.
 
 Each project keeps its sessions and history in `sandbox-state/<folder>-<id>/` (a moved or renamed project starts fresh); sessions from before that are in `sandbox/opencode-data/`.
 
@@ -451,7 +451,7 @@ qwen38-stack github add haxxards/godot --paste  # paste the private key, then En
 or put the files in place; the next sandbox picks them up and checks them:
 
 ```bash
-Q38=/home/tristanv/Development/qwen38-coding-stack
+Q38=/home/tristanv/Development/qwen-runtime/qwen38
 mkdir -p "$Q38/config/github/haxxards/godot"
 cp /path/to/key "$Q38/config/github/haxxards/godot/deploy_key"   # the .pub file is optional
 ```
@@ -481,7 +481,7 @@ sudo journalctl -u qwen38-server -n 150 --no-pager | grep -iE "error|fail|unable
 | `cudaMalloc failed: out of memory` / `failed to create context` | Weights + context cache don't fit | See **GPU out of memory** below. |
 | Service stops by itself when the Qwen3.6 one starts | Intended: they conflict | Start the one you want (see **Switching**). |
 | `Model not found: ...` | `MODEL` path doesn't match the download | `ls "$Q38/models"/*/`, then `qwen38-set MODEL=<full path>` |
-| `Address already in use` | Another server on port 8081 | `pkill -f qwen38-coding-stack/llama.cpp; sudo systemctl restart qwen38-server` |
+| `Address already in use` | Another server on port 8081 | `pkill -f qwen-runtime/qwen38/llama.cpp; sudo systemctl restart qwen38-server` |
 | `Cannot assign requested address` | Docker bridge IP isn't `HOST` | `ip -4 -o addr show docker0`, then `qwen38-set HOST=<that IP>` |
 | `error while loading shared libraries: libcudart.so` | `CUDA_HOME` points at a missing toolkit | `ls -d /usr/local/cuda-*`, then `qwen38-set CUDA_HOME=/usr/local/cuda-13.1` |
 | Installer prints `Driver supports CUDA ;` (blank) or stops with "toolkit is newer than the driver" | Older installer couldn't read newer `nvidia-smi` output; `CUDA_VER=13` also installs the newest 13.x | Use the current installer (it asks the driver directly and fixes `CUDA_HOME` in `server.env`), set `CUDA_VER=auto`, and re-run `install.sh` |

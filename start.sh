@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # One command per coding session, on the desktop or the laptop:
-#   ./start.sh [PROJECT]                 open OpenCode on PROJECT (default: the current directory)
-#   ./start.sh --folder NAME [PROJECT]   use another of this machine's setups, e.g. 20261007_desktop
-#   ./stop.sh                            stop the model servers and sandboxes, free the GPU
-# start.sh uses this machine's newest folder and installs it on first use (if the installer
-# asks for a reboot, run start.sh again afterwards). It commits the project as a git
-# checkpoint, opens OpenCode, and when OpenCode closes prints how to keep or discard the work.
+#   ./start.sh myapp                            OpenCode on ~/Development/qwen-projects/myapp (made if new)
+#   ./start.sh ~/code/app                       OpenCode on a folder elsewhere (a path: ./app, . and anything with a /)
+#   ./start.sh --folder 20261007_desktop myapp  use another of this machine's setups
+#   ./stop.sh                                   stop the model servers and sandboxes, free the GPU
+# start.sh uses this machine's newest folder and installs it on first use (if the installer asks
+# for a reboot, run start.sh again afterwards). It commits the project as a git checkpoint, opens
+# OpenCode, and when OpenCode closes prints how to keep or discard the work.
 set -euo pipefail
 
 REPO=$(dirname "$(readlink -f "$0")")
+PROJECTS=$(readlink -m -- "${QWEN_PROJECTS:-$HOME/Development/qwen-projects}")
 ME=start.sh
 die() { echo "$ME: $*" >&2; exit 1; }
 say() { echo "$ME: $*"; }
+within() { local a=${1%/} b=${2%/}; case "$a/" in "$b/"*) return 0 ;; esac; return 1; }   # $1 is $2 or inside it
 
 folders() { local f; for f in "$REPO"/2*_"$MACHINE"/; do [ -d "$f" ] && basename "$f"; done; return 0; }
+projects() { local p; for p in "$PROJECTS"/*/; do [ -d "$p" ] && basename "$p"; done; return 0; }
 
 # Sets DIR (install directory) and CMD (stack command) from a folder's install.conf.
 stack_of() {
@@ -29,10 +33,10 @@ stack_of() {
 STOP=no FOLDER="" PROJECT=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
     --stop) STOP=yes ME=stop.sh; shift ;;
     --folder)
-      [ -n "${2:-}" ] || die "usage: start.sh --folder NAME [PROJECT]"
+      [ -n "${2:-}" ] || die "usage: start.sh --folder 2026MMDD_machine PROJECT"
       FOLDER=${2%/}; FOLDER=${FOLDER##*/}; shift 2 ;;
     -*) die "Unknown option: $1 (try --help)" ;;
     *) [ -z "$PROJECT" ] || die "Only one project at a time (try --help)"; PROJECT=$1; shift ;;
@@ -53,10 +57,10 @@ if [ "$STOP" = yes ]; then
   seen=" " found=no rc=0
   for f in $(folders); do
     stack_of "$f"
-    case "$seen" in *" $DIR "*) continue ;; esac
-    seen="$seen$DIR "
+    [ -x "$DIR/bin/$CMD" ] || DIR=$HOME/Development/${CMD%-stack}-coding-stack   # not moved to its new place yet
     [ -x "$DIR/bin/$CMD" ] || continue
-    found=yes
+    case "$seen" in *" $DIR "*) continue ;; esac
+    seen="$seen$DIR " found=yes
     say "$CMD ($f)"
     "$DIR/bin/$CMD" down || rc=$?
   done
@@ -73,10 +77,26 @@ else
 fi
 stack_of "$FOLDER"
 
-[ -d "${PROJECT:-.}" ] || die "No such directory: ${PROJECT:-.} (create it first with mkdir -p)"
-PROJECT=$(readlink -f -- "${PROJECT:-.}")
-case "$(readlink -f "$HOME")/" in "${PROJECT%/}/"*) die "Refusing to open $PROJECT: choose a project folder, e.g. ~/Development/myproject" ;; esac
-case "$PROJECT/" in "$REPO/"*|"$DIR/"*) die "Refusing to open $PROJECT: it belongs to the stack, not to a project." ;; esac
+# A name is a project in $PROJECTS; a path (., .. or anything with a /) is a folder anywhere else.
+P=${PROJECTS/#$HOME/\~}
+HINT="Give a project name instead: $ME NAME opens $P/NAME (made if it's new)."
+case "$PROJECT" in
+  "") die "Which project?
+  $ME NAME   a project in $P (made if it's new)$( [ -z "$(projects)" ] || printf '; so far: %s' "$(projects | xargs)")
+  $ME PATH   a folder elsewhere, e.g. ~/code/app, or . for the current folder" ;;
+  .|..|*/*) [ -d "$PROJECT" ] || die "No such folder: $PROJECT. $HINT"
+            PROJECT=$(readlink -f -- "$PROJECT") ;;
+  .*) die "A project name can't start with a dot: $PROJECT" ;;
+  *) PROJECT=$PROJECTS/$PROJECT ;;
+esac
+if within "$PROJECT" "$REPO"; then
+  [ "$PROJECT" = "$REPO" ] || HINT="Use a project name instead: $ME ${PROJECT##*/} opens $P/${PROJECT##*/} (made if it's new)."
+  die "$PROJECT is inside this repository, so it can't be a project. $HINT"
+elif within "$PROJECT" "$DIR"; then
+  die "$PROJECT is inside the install ($DIR), so it can't be a project. $HINT"
+elif within "$REPO" "$PROJECT" || within "$DIR" "$PROJECT" || within "$PROJECTS" "$PROJECT" || within "$(readlink -f "$HOME")" "$PROJECT"; then
+  die "$PROJECT contains this repository, the install or your other projects, so it can't be a project. $HINT"
+fi
 
 if [ -z "$(git config user.name)" ] || [ -z "$(git config user.email)" ]; then
   die "git needs your name and email for the checkpoint commit. Set them once:
@@ -85,10 +105,12 @@ if [ -z "$(git config user.name)" ] || [ -z "$(git config user.email)" ]; then
 fi
 
 if [ ! -e "$DIR/cache/.installed" ]; then
-  say "$FOLDER isn't installed yet: running its installer."
+  say "$FOLDER isn't installed (or moved to $DIR) yet: running its installer."
   "$REPO/$FOLDER/installer/install.sh"
   [ -e "$DIR/cache/.installed" ] || { say "Finish the install (reboot if it asked you to), then run start.sh again."; exit 0; }
 fi
+
+[ -d "$PROJECT" ] || { mkdir -p "$PROJECT"; say "New project: $PROJECT"; }
 
 # Checkpoint: everything in the project is committed, so the session's work can be undone.
 HERE=$(readlink -f .)
