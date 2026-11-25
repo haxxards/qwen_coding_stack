@@ -298,7 +298,7 @@ curl -s "http://$HOST:$PORT/v1/chat/completions" \
 
 Stop it with **Ctrl+C** in the first terminal.
 
-Find the largest context that fits with the whole model on the GPU. It stops any running server, tries each size from largest to smallest, saves the first that starts, and restarts the service if it's installed:
+Find the largest context that fits with the whole model on the GPU. It stops any running server, tries each size from largest to smallest, saves the first that answers a long prompt with 512 MiB of VRAM to spare, and restarts the service if it's installed:
 
 ```bash
 qwen38-find-fit ctx 40960 32768 28672 24576 20480 16384
@@ -515,12 +515,12 @@ sudo journalctl -u qwen38-server -n 150 --no-pager | grep -iE "error|fail|unable
 | `REFUSED: this key can push` / `REFUSED: this is a personal (account) key` | The key has "Allow write access", or it's your account key | Untick write access on GitHub (or make a deploy key with `qwen38-stack github add`), then `qwen38-stack github check` |
 | `Couldn't check the key with GitHub over SSH` | Port 22 to github.com is blocked, or no network | The sandbox opens without GitHub access; a key checked before keeps working for a week. Try again on another network |
 | `git pull` in the sandbox says `ssh: not found` | The sandbox image predates GitHub access | Re-run `install.sh` (it rebuilds the image with `openssh-client`) |
-| Container can't reach the server | Server not running, or wrong stack's service is active | `systemctl status qwen38-server`; `. $Q38/config/server.env; curl http://$HOST:$PORT/v1/models` |
+| OpenCode: `ECONNREFUSED`, `Unable to connect` or `Connection reset` | The server crashes on OpenCode's first request (usually out of VRAM) and systemd restarts it, or it isn't running | `systemctl status qwen38-server`; out of memory in the log above: **GPU out of memory**, step 2 |
 | Much slower than expected | On battery or power-saver, or desktop on the NVIDIA GPU | Plug in, `powerprofilesctl set performance`, check hybrid graphics |
 
 ### GPU out of memory
 
-**What it looks like** in `sudo journalctl -u qwen38-server`: `cudaMalloc failed: out of memory`, `failed to create context`, `exiting due to model loading error`.
+**What it looks like:** OpenCode reports `ECONNREFUSED` or `Connection reset`; `sudo journalctl -u qwen38-server` shows `out of memory` or `failed to create context`.
 
 **1. See what else is using VRAM:**
 

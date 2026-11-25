@@ -142,14 +142,33 @@ SCRIPT
 # --- qwen38-find-fit: finds the largest context or GPU-layer count that fits in VRAM ---
 cat > "$Q38/bin/qwen38-find-fit" <<'SCRIPT'
 #!/usr/bin/env bash
-# Usage: qwen38-find-fit ctx N [N ...]   try context sizes (largest first), save the first that starts
+# Usage: qwen38-find-fit ctx N [N ...]   try context sizes (largest first), save the first that works
 #        qwen38-find-fit ngl N [N ...]   try GPU layer counts (highest first), save the first that
-#                                        starts minus 2 layers of headroom
+#                                        works minus 2 layers of headroom
+# A value works when the model loads, answers a long prompt and leaves MIN_FREE_MIB (default 512)
+# of VRAM free. Loading alone proves little: the first real request needs more GPU memory.
 set -uo pipefail
 Q38="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 mode=${1:-}; shift || true
 case "$mode" in ctx) KEY=CTX ;; ngl) KEY=NGL ;; *) echo "usage: qwen38-find-fit ctx|ngl N [N ...]"; exit 1 ;; esac
 [ $# -gt 0 ] || { echo "usage: qwen38-find-fit ctx|ngl N [N ...]"; exit 1; }
+. "$Q38/config/server.env"   # not exported: qwen38-set and the server read the file, not these values
+URL="http://$HOST:$PORT"; MIN_FREE_MIB=${MIN_FREE_MIB:-512}
+body=$(mktemp); trap 'rm -f "$body"' EXIT
+works() {   # $1 = the context size being tried; on failure says why in WHY
+  local words=$(( $1 / 2 < 16384 ? $1 / 2 : 16384 )) free
+  { printf '{"messages":[{"role":"user","content":"'; printf 'hello %.0s' $(seq 1 "$words")
+    printf 'Reply with OK."}],"max_tokens":8}'; } > "$body"
+  echo "  loaded; answering a $words-word prompt ..."
+  if ! curl -sf --max-time 600 -H 'Content-Type: application/json' --data-binary @"$body" "$URL/v1/chat/completions" >/dev/null; then
+    WHY="loaded, then failed on a real request: $(grep -m1 -iE 'out of memory|cuda error|ggml_assert|error' "$log" || echo "see $log")"
+    return 1
+  fi
+  free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+  if [ -n "$free" ] && [ "$free" -lt "$MIN_FREE_MIB" ]; then
+    WHY="answered, but left only $free MiB of VRAM free (needs $MIN_FREE_MIB)"; return 1
+  fi
+}
 was_active=no
 if systemctl is-active --quiet qwen38-server 2>/dev/null; then was_active=yes; sudo systemctl stop qwen38-server; fi
 pkill -f "$Q38/llama.cpp/build/bin/llama-server" 2>/dev/null; sleep 2
@@ -157,9 +176,11 @@ log="$Q38/cache/find-fit.log"
 for n in "$@"; do
   echo "Trying $KEY=$n ..."
   env "$KEY=$n" "$Q38/bin/qwen38-server" > "$log" 2>&1 &
-  pid=$!
+  pid=$! WHY=""
   while kill -0 "$pid" 2>/dev/null; do
     if grep -qi "listening" "$log"; then
+      ctx=$CTX; [ "$KEY" = NGL ] || ctx=$n
+      if ! works "$ctx"; then kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; break; fi
       kill "$pid"; wait "$pid" 2>/dev/null
       save=$n
       if [ "$KEY" = NGL ] && [ "$n" -lt 99 ]; then save=$(( n > 2 ? n - 2 : 0 )); fi
@@ -170,7 +191,7 @@ for n in "$@"; do
     fi
     sleep 2
   done
-  echo "  failed: $(grep -m1 -iE 'out of memory|error|not found' "$log" || tail -n1 "$log")"
+  echo "  failed: ${WHY:-$(grep -m1 -iE 'out of memory|error|not found' "$log" || tail -n1 "$log")}"
 done
 echo "No value started. Try smaller values, or let llama.cpp decide: qwen38-set NGL=auto"
 exit 1

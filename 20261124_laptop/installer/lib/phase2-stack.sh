@@ -258,18 +258,19 @@ laptop_prep() {
 fit_model() {
   local marker="$Q38/cache/.fitted"
   if [ "${RUN_TUNING:-yes}" != yes ]; then info "Skipping fitting (RUN_TUNING=no)"; return; fi
-  if [ -f "$marker" ] && [ "${RETUNE:-no}" != yes ]; then
+  # The marker holds the fitting method's version: a fit made by an older method is redone.
+  if [ "$(cat "$marker" 2>/dev/null)" = 2 ] && [ "${RETUNE:-no}" != yes ]; then
     info "Already fitted ($(grep -E '^(NGL|CTX)=' "$Q38/config/server.env" | tr '\n' ' ')); set RETUNE=yes to redo"
     return
   fi
   log "Fitting the model to VRAM (qwen38-find-fit $FIT_MODE $FIT_RANGE)"
   CHANGED=yes
   # shellcheck disable=SC2086
-  if "$Q38/bin/qwen38-find-fit" "$FIT_MODE" $FIT_RANGE; then touch "$marker"; return; fi
+  if "$Q38/bin/qwen38-find-fit" "$FIT_MODE" $FIT_RANGE; then echo 2 > "$marker"; return; fi
   warn "Nothing fit; retrying with CTX=$FALLBACK_CTX and fewer GPU layers."
   "$Q38/bin/qwen38-set" CTX="$FALLBACK_CTX"
   # shellcheck disable=SC2086
-  if "$Q38/bin/qwen38-find-fit" ngl $FALLBACK_NGL_RANGE; then touch "$marker"; return; fi
+  if "$Q38/bin/qwen38-find-fit" ngl $FALLBACK_NGL_RANGE; then echo 2 > "$marker"; return; fi
   warn "Still no fit. Falling back to llama.cpp's automatic fitting (NGL=auto)."
   "$Q38/bin/qwen38-set" NGL=auto
 }
